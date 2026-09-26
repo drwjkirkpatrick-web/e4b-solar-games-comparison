@@ -1,0 +1,928 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Flippy the Chip</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #000;
+            overflow: hidden;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: 'Courier New', Courier, monospace;
+            user-select: none;
+        }
+        canvas {
+            display: block;
+            box-shadow: 0 0 20px rgba(0, 255, 255, 0.5), inset 0 0 10px rgba(0, 255, 255, 0.3);
+            background-color: #000;
+        }
+        /* CRT Overlay CSS */
+        #crt-overlay {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            z-index: 100;
+            opacity: 0.1;
+            background: repeating-linear-gradient(
+                0deg,
+                rgba(0, 0, 0, 0.1),
+                rgba(0, 0, 0, 0.1) 1px,
+                transparent 1px,
+                transparent 2px
+            );
+        }
+        #vignette {
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            box-shadow: inset 0 0 100px rgba(0, 0, 0, 0.8);
+            pointer-events: none;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas"></canvas>
+    <div id="crt-overlay"></div>
+    <div id="vignette"></div>
+
+    <script>
+        // =========================================================================
+        // CORE GAME CONFIGURATION
+        // =========================================================================
+        const CANVAS_WIDTH = 400;
+        const CANVAS_HEIGHT = 600;
+        const GRAVITY = 0.4;
+        const JUMP_VELOCITY = -7.5;
+        const INITIAL_SPEED = 2.5;
+        const MAX_SPEED = 8.0;
+        const MIN_GAP = 120;
+        const MAX_GAP = 180;
+        const GAP_VARIANCE = 50;
+
+        // Game States
+        const GAME_STATE = {
+            MENU: 'MENU',
+            PLAY: 'PLAY',
+            PAUSED: 'PAUSED',
+            GAME_OVER: 'GAME_OVER'
+        };
+
+        // =========================================================================
+        // INITIALIZATION
+        // =========================================================================
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        canvas.width = CANVAS_WIDTH;
+        canvas.height = CANVAS_HEIGHT;
+
+        let gameState = GAME_STATE.MENU;
+        let score = 0;
+        let highScore = localStorage.getItem('flippyHighScore') || 0;
+        let gameSpeed = INITIAL_SPEED;
+        let lastSpawnTime = 0;
+        let particles = [];
+        let powerUps = [];
+        let achievements = JSON.parse(localStorage.getItem('flippyAchievements')) || {};
+        let isMuted = false;
+        let lastTime = 0;
+
+        // Audio Context setup
+        let audioContext;
+        let masterGain;
+        let soundEnabled = true;
+
+        // =========================================================================
+        // AUDIO ENGINE (Web Audio API)
+        // =========================================================================
+
+        function initAudio() {
+            if (audioContext) return;
+            audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            masterGain = audioContext.createGain();
+            masterGain.gain.value = soundEnabled ? 0.5 : 0;
+            masterGain.connect(audioContext.destination);
+        }
+
+        function playSound(type) {
+            if (!soundEnabled || !audioContext) return;
+
+            const osc = audioContext.createOscillator();
+            const gainNode = audioContext.createGain();
+            osc.connect(gainNode);
+            gainNode.connect(masterGain);
+
+            switch (type) {
+                case 'flap':
+                    // Short square wave blip
+                    osc.type = 'square';
+                    osc.frequency.setValueAtTime(880, audioContext.currentTime);
+                    gainNode.gain.setValueAtTime(0.1, audioContext.currentTime);
+                    gainNode.gain.exponentialRampToValue(0.001, audioContext.currentTime + 0.1);
+                    osc.start(audioContext.currentTime);
+                    osc.stop(audioContext.currentTime + 0.1);
+                    break;
+                case 'score':
+                    // Ascending chime
+                    osc.type = 'sine';
+                    let freq = 440;
+                    gainNode.gain.setValueAtTime(0.1, audioContext.currentTime);
+                    osc.frequency.setValueAtTime(freq, audioContext.currentTime);
+                    osc.frequency.exponentialRampToValue(freq * 1.5, audioContext.currentTime + 0.2);
+                    gainNode.gain.exponentialRampToValue(0.001, audioContext.currentTime + 0.2);
+                    osc.start(audioContext.currentTime);
+                    osc.stop(audioContext.currentTime + 0.2);
+                    break;
+                case 'crash':
+                    // Descending sawtooth with noise
+                    const noise = audioContext.createBuffer(1, audioContext.sampleRate * 0.5, audioContext.sampleRate);
+                    const output = noise.getChannelData(0);
+                    for (let i = 0; i < output.length; i++) {
+                        output[i] = Math.random() * 2 - 1;
+                    }
+                    const noiseGain = audioContext.createGain();
+                    noiseGain.gain.setValueAtTime(0.3, audioContext.currentTime);
+                    noiseGain.connect(masterGain);
+
+                    osc.type = 'sawtooth';
+                    osc.frequency.setValueAtTime(200, audioContext.currentTime);
+                    gainNode.gain.setValueAtTime(0.2, audioContext.currentTime);
+                    osc.frequency.exponentialRampToValue(50, audioContext.currentTime + 0.5);
+                    gainNode.gain.exponentialRampToValue(0.001, audioContext.currentTime + 0.5);
+                    osc.start(audioContext.currentTime);
+                    osc.stop(audioContext.currentTime + 0.5);
+
+                    noiseGain.buffer = noise;
+                    noiseGain.start(audioContext.currentTime);
+                    noiseGain.stop(audioContext.currentTime + 0.5);
+                    break;
+                case 'gameover':
+                    // Low triangle wave
+                    osc.type = 'triangle';
+                    osc.frequency.setValueAtTime(50, audioContext.currentTime);
+                    gainNode.gain.setValueAtTime(0.2, audioContext.currentTime);
+                    gainNode.gain.exponentialRampToValue(0.001, audioContext.currentTime + 1.0);
+                    osc.start(audioContext.currentTime);
+                    osc.stop(audioContext.currentTime + 1.0);
+                    break;
+            }
+        }
+
+        // =========================================================================
+        // ENTITY CLASSES
+        // =========================================================================
+
+        class Flippy {
+            constructor() {
+                this.width = 30;
+                this.height = 30;
+                this.x = 50;
+                this.y = CANVAS_HEIGHT / 2;
+                this.velocity = 0;
+                this.rotation = 0;
+                this.isShieldActive = false;
+                this.shieldTimer = 0;
+                this.isSlowMoActive = false;
+                this.slowMoTimer = 0;
+                this.isDoubleBitActive = false;
+                this.doubleBitTimer = 0;
+                this.trail = [];
+                this.trailLength = 15;
+            }
+
+            flap() {
+                this.velocity = JUMP_VELOCITY;
+                playSound('flap');
+            }
+
+            update(dt) {
+                // Apply gravity
+                this.velocity += GRAVITY;
+                this.y += this.velocity;
+
+                // Update rotation based on velocity
+                this.rotation = Math.min(Math.PI / 2, Math.max(-Math.PI / 4, this.velocity * 0.1));
+
+                // Update trail
+                this.trail.unshift({ x: this.x, y: this.y });
+                if (this.trail.length > this.trailLength) {
+                    this.trail.pop();
+                }
+
+                // Handle Power-up Timers
+                if (this.shieldTimer > 0) {
+                    this.shieldTimer -= dt;
+                    this.isShieldActive = true;
+                } else {
+                    this.isShieldActive = false;
+                }
+
+                if (this.slowMoTimer > 0) {
+                    this.slowMoTimer -= dt;
+                    this.isSlowMoActive = true;
+                } else {
+                    this.isSlowMoActive = false;
+                }
+
+                if (this.doubleBitTimer > 0) {
+                    this.doubleBitTimer -= dt;
+                    this.isDoubleBitActive = true;
+                } else {
+                    this.isDoubleBitActive = false;
+                }
+            }
+
+            draw() {
+                ctx.save();
+                ctx.translate(this.x + this.width / 2, this.y + this.height / 2);
+                ctx.rotate(this.rotation);
+                ctx.translate(-(this.x + this.width / 2), -(this.y + this.height / 2));
+
+                // 1. Draw Trail (Fading Silhouettes)
+                this.trail.forEach((point, index) => {
+                    const alpha = 1 - (index / this.trailLength);
+                    ctx.fillStyle = `rgba(0, 200, 255, ${alpha * 0.3})`;
+                    ctx.fillRect(point.x, point.y, this.width, this.height);
+                });
+
+                // 2. Draw Chip Body (Rounded Square)
+                ctx.fillStyle = '#FFD700'; // Gold base
+                ctx.strokeStyle = '#FF8C00';
+                ctx.lineWidth = 2;
+                ctx.beginPath();
+                ctx.moveTo(this.x + 5, this.y);
+                ctx.lineTo(this.x + this.width - 5, this.y);
+                ctx.arcTo(this.x + this.width, this.y, this.x + this.width, this.y + 5, 5);
+                ctx.lineTo(this.x + this.width, this.y + this.height - 5);
+                ctx.arcTo(this.x + this.width, this.y + this.height, this.x + this.width - 5, this.y + this.height, 5);
+                ctx.lineTo(this.x + 5, this.y + this.height);
+                ctx.arcTo(this.x, this.y + this.height, this.x, this.y + this.height - 5, 5);
+                ctx.lineTo(this.x, this.y + 5);
+                ctx.arcTo(this.x, this.y, this.x + 5, this.y, 5);
+                ctx.closePath();
+                ctx.fill();
+                ctx.stroke();
+
+                // 3. Draw Circuit Traces (Cyan/Green)
+                ctx.strokeStyle = '#00FFFF';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.moveTo(this.x + 10, this.y + 10);
+                ctx.lineTo(this.x + this.width - 10, this.y + this.height - 10);
+                ctx.stroke();
+
+                // 4. Draw Pins (Gold)
+                ctx.fillStyle = '#FFD700';
+                ctx.fillRect(this.x - 3, this.y + 5, 3, this.height - 10);
+                ctx.fillRect(this.x + this.width, this.y + 5, 3, this.height - 10);
+
+                // 5. Draw Face/Eyes
+                ctx.fillStyle = '#000';
+                ctx.fillRect(this.x + 8, this.y + 10, 5, 5);
+                ctx.fillRect(this.x + this.width - 13, this.y + 10, 5, 5);
+
+                // 6. Draw LED
+                ctx.fillStyle = this.isShieldActive ? '#0000FF' : '#00FF00';
+                ctx.beginPath();
+                ctx.arc(this.x + this.width / 2, this.y + this.height - 10, 4, 0, Math.PI * 2);
+                ctx.fill();
+
+                ctx.restore();
+            }
+        }
+
+        class Obstacle {
+            constructor(x, gapY) {
+                this.x = x;
+                this.gapY = gapY;
+                this.width = 50;
+                this.height = CANVAS_HEIGHT;
+                this.passed = false;
+                this.isPowerUp = false;
+                this.powerUpType = null;
+            }
+
+            update() {
+                this.x -= gameSpeed;
+            }
+
+            draw() {
+                const topHeight = this.gapY - 150;
+                const bottomHeight = CANVAS_HEIGHT - (this.gapY + 150);
+
+                // --- Draw Top Rack ---
+                ctx.fillStyle = '#333'; // Dark Metal
+                ctx.fillRect(this.x, 0, this.width, topHeight);
+                // Top details (Ventilation slots)
+                ctx.fillStyle = '#111';
+                for (let i = 0; i < 3; i++) {
+                    ctx.fillRect(this.x + 5, 20 + i * 25, 10, 5);
+                }
+                // Top LED
+                ctx.fillStyle = 'green';
+                ctx.fillRect(this.x + 5, 5, 5, 5);
+
+                // --- Draw Bottom Rack ---
+                ctx.fillStyle = '#333';
+                ctx.fillRect(this.x, this.gapY + 150, this.width, bottomHeight);
+                // Bottom details
+                ctx.fillStyle = '#111';
+                for (let i = 0; i < 3; i++) {
+                    ctx.fillRect(this.x + 5, this.gapY + 150 + 20 + i * 25, 10, 5);
+                }
+                // Bottom LED
+                ctx.fillStyle = 'red';
+                ctx.fillRect(this.x + 5, this.gapY + 150 + bottomHeight - 10, 5, 5);
+
+                // --- Draw Gap Glow ---
+                ctx.shadowBlur = 15;
+                ctx.shadowColor = '#00FFFF';
+                ctx.fillStyle = 'rgba(0, 255, 255, 0.2)';
+                ctx.fillRect(this.x, this.gapY - 10, this.width, 20);
+                ctx.fillRect(this.x, this.gapY + 150, this.width, 20);
+                ctx.shadowBlur = 0;
+
+                // --- Draw Power-Up (if applicable) ---
+                if (this.isPowerUp) {
+                    this.drawPowerUp();
+                }
+            }
+
+            drawPowerUp() {
+                const size = 15;
+                ctx.save();
+                ctx.translate(this.x + this.width / 2, this.gapY + 150);
+                
+                if (this.powerUpType === 'shield') {
+                    ctx.strokeStyle = '#0000FF';
+                    ctx.lineWidth = 3;
+                    ctx.beginPath();
+                    ctx.arc(0, 0, size, 0, Math.PI * 2);
+                    ctx.stroke();
+                    ctx.fillStyle = 'rgba(0, 0, 255, 0.3)';
+                    ctx.fill();
+                } else if (this.powerUpType === 'slow') {
+                    ctx.fillStyle = '#8A2BE2'; // Purple
+                    ctx.fillRect(-size/2, -size/2, size, size);
+                    ctx.fillStyle = '#FFF';
+                    ctx.font = '10px Courier New';
+                    ctx.textAlign = 'center';
+                    ctx.fillText('S', 0, 5);
+                } else if (this.powerUpType === 'double') {
+                    ctx.fillStyle = '#FFD700'; // Gold
+                    ctx.beginPath();
+                    ctx.moveTo(0, -size);
+                    ctx.lineTo(size, size);
+                    ctx.lineTo(-size, size);
+                    ctx.closePath();
+                    ctx.fill();
+                }
+                ctx.restore();
+            }
+        }
+
+        class Particle {
+            constructor(x, y, color, size, vx, vy) {
+                this.x = x;
+                this.y = y;
+                this.color = color;
+                this.size = size;
+                this.vx = vx;
+                this.vy = vy;
+                this.life = 1.0;
+                this.maxLife = 60;
+            }
+
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.vy += 0.1; // Gravity effect
+                this.life -= 1 / this.maxLife;
+                this.size *= 0.98;
+            }
+
+            draw() {
+                ctx.fillStyle = `rgba(${this.color}, ${this.life})`;
+                ctx.fillRect(this.x, this.y, this.size, this.size);
+            }
+        }
+
+        // =========================================================================
+        // GAME OBJECT INSTANCES
+        // =========================================================================
+
+        let flippy = new Flippy();
+        let obstacles = [];
+        let matrixRain = [];
+        const MAX_RAIN_ROWS = 20;
+
+        // =========================================================================
+        // GAME LOGIC FUNCTIONS
+        // =========================================================================
+
+        function spawnMatrixRain() {
+            if (matrixRain.length < MAX_RAIN_ROWS) {
+                matrixRain.push({
+                    x: Math.random() * CANVAS_WIDTH,
+                    y: Math.random() * CANVAS_HEIGHT,
+                    speed: 0.5 + Math.random() * 1.5,
+                    char: Math.random() > 0.5 ? '0' : '1'
+                });
+            }
+        }
+
+        function spawnObstacle() {
+            // Difficulty scaling
+            const minGap = Math.max(MIN_GAP, MAX_GAP - Math.floor(score / 5) * 10);
+            const gapY = Math.random() * (CANVAS_HEIGHT - 300) + 150;
+
+            let newObstacle = new Obstacle(CANVAS_WIDTH, gapY);
+
+            // 5% chance for power-up
+            if (Math.random() < 0.05) {
+                const types = ['shield', 'slow', 'double'];
+                const type = types[Math.floor(Math.random() * types.length)];
+                newObstacle.isPowerUp = true;
+                newObstacle.powerUpType = type;
+            }
+
+            obstacles.push(newObstacle);
+        }
+
+        function checkCollision(rect1, rect2) {
+            return rect1.x < rect2.x + rect2.width &&
+                   rect1.x + rect1.width > rect2.x &&
+                   rect1.y < rect2.y + rect2.height &&
+                   rect1.y + rect1.height > rect2.y;
+        }
+
+        function handleGameLogic(dt) {
+            if (gameState !== GAME_STATE.PLAY) return;
+
+            // 1. Update Speed and Difficulty
+            const scoreRatio = Math.min(1, score / 100);
+            gameSpeed = INITIAL_SPEED + (MAX_SPEED - INITIAL_SPEED) * scoreRatio;
+
+            // 2. Update Flippy
+            flippy.update(dt);
+
+            // 3. Update Obstacles and Check Collisions
+            for (let i = obstacles.length - 1; i >= 0; i--) {
+                const obs = obstacles[i];
+                obs.update();
+
+                // Collision Check (Flippy vs Obstacle)
+                const flippyRect = { x: flippy.x, y: flippy.y, width: flippy.width, height: flippy.height };
+                
+                // Top pipe collision
+                const topPipeRect = { x: obs.x, y: 0, width: obs.width, height: obs.gapY - 150 };
+                // Bottom pipe collision
+                const bottomPipeRect = { x: obs.x, y: obs.gapY + 150, width: obs.width, height: CANVAS_HEIGHT - (obs.gapY + 150) };
+
+                if (checkCollision(flippyRect, topPipeRect) || checkCollision(flippyRect, bottomPipeRect)) {
+                    if (!flippy.isShieldActive) {
+                        gameOver();
+                        return;
+                    } else {
+                        // Shield hit!
+                        flippy.isShieldActive = false;
+                        flippy.shieldTimer = 0;
+                        playSound('crash');
+                        // Particle effect for shield break
+                        for (let j = 0; j < 10; j++) {
+                            particles.push(new Particle(flippy.x, flippy.y, '255, 255, 255', 3, (Math.random() - 0.5) * 3, (Math.random() - 0.5) * 3));
+                        }
+                    }
+                }
+
+                // Scoring
+                if (obs.x + obs.width < flippy.x && !obs.passed) {
+                    obs.passed = true;
+                    score++;
+                    playSound('score');
+                    handleAchievement(score);
+                    
+                    // Apply score effect
+                    if (flippy.isDoubleBitActive) {
+                        score += score; // Double score
+                    }
+                }
+
+                // Remove off-screen obstacles
+                if (obs.x + obs.width < 0) {
+                    obstacles.splice(i, 1);
+                }
+            }
+
+            // 4. Update Power-ups
+            for (let i = powerUps.length - 1; i >= 0; i--) {
+                const pu = powerUps[i];
+                pu.x -= gameSpeed;
+                pu.draw();
+
+                if (checkCollision(flippyRect, { x: pu.x, y: pu.y, width: pu.width, height: pu.height })) {
+                    applyPowerUp(pu.powerUpType);
+                    powerUps.splice(i, 1);
+                }
+
+                if (pu.x < -pu.width) {
+                    powerUps.splice(i, 1);
+                }
+            }
+
+            // 5. Update Particles
+            for (let i = particles.length - 1; i >= 0; i--) {
+                particles[i].update();
+                if (particles[i].life <= 0) {
+                    particles.splice(i, 1);
+                }
+            }
+
+            // 6. Update Matrix Rain
+            matrixRain.forEach(r => {
+                r.y += r.speed;
+                if (r.y > CANVAS_HEIGHT) {
+                    r.y = 0;
+                    r.x = Math.random() * CANVAS_WIDTH;
+                }
+            });
+
+            // 7. Check Ground/Ceiling Collision
+            if (flippy.y + flippy.height > CANVAS_HEIGHT - 50 || flippy.y < 0) {
+                gameOver();
+            }
+
+            // 8. Spawn Logic
+            if (Date.now() - lastSpawnTime > 2000 - (score * 50)) {
+                spawnObstacle();
+                lastSpawnTime = Date.now();
+            }
+        }
+
+        function applyPowerUp(type) {
+            switch (type) {
+                case 'shield':
+                    flippy.isShieldActive = true;
+                    flippy.shieldTimer = 5000; // 5 seconds
+                    break;
+                case 'slow':
+                    flippy.isSlowMoActive = true;
+                    flippy.slowMoTimer = 5000; // 5 seconds
+                    // Apply slow motion effect by reducing gameSpeed temporarily
+                    gameSpeed *= 0.5;
+                    setTimeout(() => {
+                        gameSpeed /= 0.5;
+                    }, 5000);
+                    break;
+                case 'double':
+                    flippy.isDoubleBitActive = true;
+                    flippy.doubleBitTimer = 10000; // 10 seconds
+                    break;
+            }
+        }
+
+        function gameOver() {
+            gameState = GAME_STATE.GAME_OVER;
+            playSound('gameover');
+            // Crash particle explosion
+            for (let i = 0; i < 50; i++) {
+                const angle = Math.random() * Math.PI * 2;
+                const speed = Math.random() * 5 + 1;
+                const vx = Math.cos(angle) * speed;
+                const vy = Math.sin(angle) * speed;
+                const color = Math.random() > 0.5 ? '255, 50, 0' : '255, 255, 0';
+                particles.push(new Particle(flippy.x + flippy.width / 2, flippy.y + flippy.height / 2, color, 4, vx, vy));
+            }
+            
+            // Update High Score
+            if (score > highScore) {
+                highScore = score;
+                localStorage.setItem('flippyHighScore', highScore);
+                // Achievement for Century Chip
+                if (score >= 100 && !achievements['CENTURY CHIP']) {
+                    achievements['CENTURY CHIP'] = true;
+                    showAchievementNotification("CENTURY CHIP! You reached 100 bits!");
+                }
+            }
+        }
+
+        function handleAchievement(score) {
+            const achievementsList = {
+                'FIRST BIT': 1,
+                'FULL BYTE': 8,
+                'FIREWALL BREACHER': 25,
+                'HALF KILOBIT': 50,
+                'CENTURY CHIP': 100
+            };
+
+            for (const [name, requiredScore] of Object.entries(achievementsList)) {
+                if (score === requiredScore && !achievements[name]) {
+                    achievements[name] = true;
+                    showAchievementNotification(name);
+                }
+            }
+        }
+
+        function showAchievementNotification(name) {
+            const notification = document.createElement('div');
+            notification.style.cssText = `
+                position: fixed; top: 20px; left: 50%; transform: translateX(-50%);
+                background: rgba(0, 255, 255, 0.9); color: #000; padding: 15px 30px;
+                border-radius: 10px; z-index: 1000; opacity: 0; transition: opacity 0.5s, transform 0.5s;
+                box-shadow: 0 0 20px #00FFFF;
+            `;
+            notification.textContent = `ACHIEVEMENT UNLOCKED: ${name}!`;
+            document.body.appendChild(notification);
+
+            // Animate in
+            setTimeout(() => {
+                notification.style.opacity = 1;
+                notification.style.transform = 'translate(-50%, 0)';
+            }, 10);
+
+            // Animate out and remove
+            setTimeout(() => {
+                notification.style.opacity = 0;
+                notification.style.transform = 'translate(-50%, -100px)';
+                setTimeout(() => notification.remove(), 500);
+            }, 3000);
+        }
+
+        // =========================================================================
+        // DRAWING FUNCTIONS (RENDER)
+        // =========================================================================
+
+        function drawBackground() {
+            // 1. Circuit Board Base
+            ctx.fillStyle = '#050505';
+            ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+            // 2. Traces and Pads (Parallax Effect)
+            ctx.strokeStyle = '#1A1A1A';
+            ctx.lineWidth = 1;
+            const scrollOffset = (Date.now() / 100) % 50;
+            
+            // Far layer (Dim)
+            ctx.strokeStyle = 'rgba(0, 255, 255, 0.05)';
+            for (let i = 0; i < 10; i++) {
+                ctx.beginPath();
+                ctx.moveTo(0, i * 60 + scrollOffset);
+                ctx.lineTo(CANVAS_WIDTH, i * 60 + scrollOffset);
+                ctx.stroke();
+            }
+
+            // Near layer (Bright)
+            ctx.strokeStyle = 'rgba(0, 255, 255, 0.2)';
+            for (let i = 0; i < 5; i++) {
+                ctx.beginPath();
+                ctx.moveTo(50 + i * 100, 0);
+                ctx.lineTo(50 + i * 100 + scrollOffset, CANVAS_HEIGHT);
+                ctx.stroke();
+            }
+
+            // 3. Matrix Rain
+            ctx.fillStyle = '#0F0';
+            matrixRain.forEach(r => {
+                ctx.fillText(r.char, r.x, r.y);
+            });
+
+            // 4. Ground Strip
+            ctx.fillStyle = '#222';
+            ctx.fillRect(0, CANVAS_HEIGHT - 50, CANVAS_WIDTH, 50);
+            // Ground texture
+            ctx.strokeStyle = '#00FF00';
+            for (let i = 0; i < CANVAS_WIDTH; i += 10) {
+                ctx.beginPath();
+                ctx.moveTo(i, CANVAS_HEIGHT - 50);
+                ctx.lineTo(i + 5, CANVAS_HEIGHT - 50);
+                ctx.stroke();
+            }
+        }
+
+        function drawMenu() {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+            ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+            // Title
+            ctx.fillStyle = '#00FFFF';
+            ctx.shadowColor = '#00FFFF';
+            ctx.shadowBlur = 15;
+            ctx.font = 'bold 48px Courier New';
+            ctx.textAlign = 'center';
+            ctx.fillText('FLIPPY THE CHIP', CANVAS_WIDTH / 2, 150);
+            ctx.shadowBlur = 0;
+
+            // Subtitle
+            ctx.fillStyle = '#AAAAAA';
+            ctx.font = '16px Courier New';
+            ctx.fillText('Help Flippy get home! Dodge the racks, collect the bits!', CANVAS_WIDTH / 2, 200);
+
+            // High Score
+            ctx.fillStyle = '#FFD700';
+            ctx.font = '20px Courier New';
+            ctx.fillText(`BEST SCORE: ${highScore}`, CANVAS_WIDTH / 2, 250);
+
+            // Start Prompt
+            ctx.fillStyle = '#00FF00';
+            ctx.font = '20px Courier New';
+            ctx.fillText('PRESS SPACE OR TAP TO START', CANVAS_WIDTH / 2, 350);
+        }
+
+        function drawHUD() {
+            // Cyan Glow
+            ctx.fillStyle = 'rgba(0, 255, 255, 0.8)';
+            ctx.font = '24px Courier New';
+            ctx.textAlign = 'left';
+            ctx.fillText(`BITS: ${score}`, 10, 30);
+
+            // Gold High Score
+            ctx.fillStyle = '#FFD700';
+            ctx.font = '16px Courier New';
+            ctx.fillText(`BEST: ${highScore}`, 10, 60);
+
+            // Speed Indicator
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = '12px Courier New';
+            ctx.textAlign = 'right';
+            ctx.fillText(`SPEED: ${gameSpeed.toFixed(1)}`, CANVAS_WIDTH - 10, 30);
+
+            // Power-up Status
+            if (flippy.isShieldActive) {
+                ctx.fillStyle = '#0000FF';
+                ctx.font = '12px Courier New';
+                ctx.fillText('SHIELD ACTIVE', CANVAS_WIDTH - 150, 30);
+            }
+            if (flippy.isSlowMoActive) {
+                ctx.fillStyle = '#8A2BE2';
+                ctx.font = '12px Courier New';
+                ctx.fillText('SLOW-MO ACTIVE', CANVAS_WIDTH - 150, 60);
+            }
+            if (flippy.isDoubleBitActive) {
+                ctx.fillStyle = '#FFD700';
+                ctx.font = '12px Courier New';
+                ctx.fillText('DOUBLE BIT ACTIVE', CANVAS_WIDTH - 150, 90);
+            }
+        }
+
+        function drawGameOver() {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.9)';
+            ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+            // Glitch Text
+            ctx.fillStyle = '#FF0000';
+            ctx.shadowColor = '#FF0000';
+            ctx.shadowBlur = 10;
+            ctx.font = 'bold 60px Courier New';
+            ctx.textAlign = 'center';
+            ctx.fillText('SYSTEM CRASH', CANVAS_WIDTH / 2, 250);
+            ctx.shadowBlur = 0;
+
+            // Score
+            ctx.fillStyle = '#00FFFF';
+            ctx.font = '24px Courier New';
+            ctx.fillText(`BITS COLLECTED: ${score}`, CANVAS_WIDTH / 2, 320);
+
+            // Restart Prompt
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = '18px Courier New';
+            ctx.fillText('PRESS SPACE TO RESTART', CANVAS_WIDTH / 2, 400);
+        }
+
+        function drawPause() {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+            ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+            
+            ctx.fillStyle = '#FF0000';
+            ctx.font = 'bold 30px Courier New';
+            ctx.textAlign = 'center';
+            ctx.fillText('PAUSED', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2);
+
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = '16px Courier New';
+            ctx.fillText('Press P to Resume', CANVAS_WIDTH / 2, CANVAS_HEIGHT / 2 + 40);
+        }
+
+        // =========================================================================
+        // MAIN LOOP & CONTROL
+        // =========================================================================
+
+        function gameLoop(timestamp) {
+            const dt = timestamp - lastTime;
+            lastTime = timestamp;
+
+            // Clear Canvas
+            ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+            // 1. Draw Environment
+            drawBackground();
+
+            // 2. Update and Draw Game Entities
+            if (gameState === GAME_STATE.PLAY) {
+                handleGameLogic(dt);
+
+                // Draw Obstacles
+                obstacles.forEach(obs => obs.draw());
+                // Draw PowerUps (handled inside Obstacle draw for simplicity)
+                // Draw Particles
+                particles.forEach(p => p.draw());
+                // Draw Flippy
+                flippy.draw();
+                // Draw HUD
+                drawHUD();
+            }
+
+            // 3. Draw UI States
+            if (gameState === GAME_STATE.MENU) {
+                drawMenu();
+            } else if (gameState === GAME_STATE.PAUSED) {
+                drawPause();
+            } else if (gameState === GAME_STATE.GAME_OVER) {
+                drawGameOver();
+            }
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        function startGame() {
+            if (gameState === GAME_STATE.PLAY) return;
+            
+            // Reset state
+            score = 0;
+            gameSpeed = INITIAL_SPEED;
+            flippy = new Flippy();
+            obstacles = [];
+            particles = [];
+            powerUps = [];
+            gameState = GAME_STATE.PLAY;
+            lastTime = performance.now();
+            
+            // Start the loop if it wasn't running
+            if (gameState !== GAME_STATE.PLAY) {
+                requestAnimationFrame(gameLoop);
+            }
+        }
+
+        function togglePause() {
+            if (gameState === GAME_STATE.PLAY) {
+                gameState = GAME_STATE.PAUSED;
+            } else if (gameState === GAME_STATE.PAUSED) {
+                gameState = GAME_STATE.PLAY;
+            }
+        }
+
+        function toggleMute() {
+            isMuted = !isMuted;
+            masterGain.gain.value = isMuted ? 0 : 0.5;
+        }
+
+        // =========================================================================
+        // INPUT HANDLERS
+        // =========================================================================
+
+        function handleInput(event) {
+            const key = event.key || event.type;
+            
+            if (key === ' ' || key === 'ArrowUp' || key === 'click' || key === 'touchstart') {
+                if (gameState === GAME_STATE.MENU || gameState === GAME_STATE.GAME_OVER) {
+                    startGame();
+                } else if (gameState === GAME_STATE.PLAY) {
+                    flippy.flap();
+                } else if (gameState === GAME_STATE.PAUSED) {
+                    // Ignore flap in pause
+                }
+            } else if (key === 'p' || key === 'P') {
+                togglePause();
+            } else if (key === 's' || key === 'S') {
+                toggleMute();
+            }
+        }
+
+        window.addEventListener('keydown', handleInput);
+        canvas.addEventListener('mousedown', handleInput);
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault(); // Prevent scrolling on mobile
+            handleInput();
+        });
+
+        // =========================================================================
+        // INITIAL SETUP
+        // =========================================================================
+        window.onload = () => {
+            initAudio();
+            // Start the loop immediately to show the Menu
+            requestAnimationFrame(gameLoop);
+        };
+
+    </script>
+</body>
+</html>

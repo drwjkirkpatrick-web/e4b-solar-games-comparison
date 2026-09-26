@@ -1,0 +1,584 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>TOWER TYCOON</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #87CEEB; /* Sky Blue Background */
+            font-family: 'Arial', sans-serif;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            overflow: hidden;
+            user-select: none;
+        }
+        #game-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            width: 100%;
+            max-width: 800px;
+            padding-top: 10px;
+        }
+        canvas {
+            border: 4px solid #333;
+            background-color: #a0d8ff; /* Lighter Sky */
+            cursor: pointer;
+            display: block;
+        }
+        #hud {
+            width: 100%;
+            display: flex;
+            justify-content: space-around;
+            padding: 10px 0;
+            background-color: rgba(0, 0, 0, 0.6);
+            color: white;
+            font-size: 18px;
+            text-transform: uppercase;
+            border-radius: 5px;
+            margin-bottom: 10px;
+        }
+        #build-menu {
+            display: flex;
+            justify-content: center;
+            gap: 10px;
+            padding: 15px 0;
+            background-color: rgba(255, 255, 255, 0.8);
+            border-radius: 8px;
+            box-shadow: 0 4px 8px rgba(0, 0, 0, 0.2);
+        }
+        .floor-button {
+            padding: 10px 15px;
+            border: 2px solid #333;
+            background-color: #eee;
+            cursor: pointer;
+            font-weight: bold;
+            transition: background-color 0.1s, transform 0.1s;
+            min-width: 100px;
+            text-align: center;
+        }
+        .floor-button:hover:not(:disabled) {
+            background-color: #ddd;
+            transform: translateY(-2px);
+        }
+        .floor-button:disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+        #ui-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.7);
+            color: white;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            z-index: 100;
+            padding: 20px;
+            box-sizing: border-box;
+        }
+        #ui-overlay h1 {
+            font-size: 48px;
+            margin-bottom: 20px;
+            color: #FFD700;
+        }
+        #ui-overlay button {
+            padding: 15px 30px;
+            font-size: 24px;
+            cursor: pointer;
+            background-color: #4CAF50;
+            color: white;
+            border: none;
+            border-radius: 5px;
+            margin-top: 20px;
+        }
+        #ui-overlay button:hover {
+            background-color: #45a049;
+        }
+        .controls {
+            position: fixed;
+            bottom: 10px;
+            right: 20px;
+            background: rgba(0, 0, 0, 0.7);
+            color: white;
+            padding: 5px 10px;
+            border-radius: 5px;
+            font-size: 14px;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="game-container">
+        <div id="hud">
+            <div id="money-display">Money: $3000</div>
+            <div id="floor-display">Floors: 0 / 15</div>
+            <div id="high-score-display">High Score: $0</div>
+        </div>
+
+        <canvas id="gameCanvas" width="480" height="640"></canvas>
+
+        <div id="build-menu">
+            <button id="btn-lobby" class="floor-button" data-type="Lobby">Lobby (Free)</button>
+            <button id="btn-apartment" class="floor-button" data-type="Apartment">$300 (Apt)</button>
+            <button id="btn-shop" class="floor-button" data-type="Shop">$500 (Shop)</button>
+            <button id="btn-office" class="floor-button" data-type="Office">$700 (Office)</button>
+        </div>
+    </div>
+    
+    <div class="controls">
+        [P] Pause | [M] Mute | Click to Build/Demolish
+    </div>
+
+    <div id="ui-overlay" style="display: none;">
+        <h1 id="ui-title">TOWER TYCOON</h1>
+        <p id="ui-message">CLICK TO START</p>
+        <button id="ui-start-button">START GAME</button>
+    </div>
+
+<script>
+    // =========================================================================
+    // CORE GAME SETUP
+    // =========================================================================
+    const canvas = document.getElementById('gameCanvas');
+    const ctx = canvas.getContext('2d');
+    
+    const GRID_COLS = 8;
+    const GRID_ROWS = 16;
+    const CELL_SIZE = 36;
+    const CANVAS_WIDTH = GRID_COLS * CELL_SIZE;
+    const CANVAS_HEIGHT = GRID_ROWS * CELL_SIZE;
+
+    // Adjust canvas size to fit the defined grid dimensions
+    canvas.width = CANVAS_WIDTH;
+    canvas.height = CANVAS_HEIGHT;
+
+    // Game State
+    let gameState = 'TITLE'; // TITLE, PLAY, WIN, LOSE
+    let money = 3000;
+    let floorsBuilt = 0;
+    let selectedFloorType = 'Lobby';
+    let isPaused = true;
+    let isMuted = false;
+    let lastEconomyTick = performance.now();
+    const TICK_INTERVAL = 2000; // 2 seconds
+
+    // Grid: Stores floor types. null means empty.
+    // Structure: grid[row][col]
+    let grid = Array(GRID_ROWS).fill(0).map(() => Array(GRID_COLS).fill(null));
+
+    // Floor Definitions
+    const FLOOR_TYPES = {
+        Lobby: { cost: 0, rent: 30, maintenance: 3, color: '#8B4513', label: 'Lobby', people: 0 }, // Brown
+        Apartment: { cost: 300, rent: 30, maintenance: 3, color: '#32CD32', label: 'Apt', people: 3 }, // Green
+        Shop: { cost: 500, rent: 50, maintenance: 3, color: '#FFD700', label: 'Shop', people: 2 }, // Yellow
+        Office: { cost: 700, rent: 70, maintenance: 3, color: '#1E90FF', label: 'Office', people: 1 }  // Blue
+    };
+
+    // UI Elements
+    const ui = {
+        money: document.getElementById('money-display'),
+        floors: document.getElementById('floor-display'),
+        highScore: document.getElementById('high-score-display'),
+        overlay: document.getElementById('ui-overlay'),
+        title: document.getElementById('ui-title'),
+        message: document.getElementById('ui-message'),
+        startButton: document.getElementById('ui-start-button')
+    };
+
+    // Audio Context
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+
+    // =========================================================================
+    // AUDIO FUNCTIONS (Synthesized)
+    // =========================================================================
+
+    /** Plays a simple tone */
+    function playTone(frequency, duration, type = 'sine', volume = 0.1) {
+        if (isMuted || audioContext.state === 'suspended') return;
+        const oscillator = audioContext.createOscillator();
+        const gainNode = audioContext.createGain();
+
+        oscillator.type = type;
+        oscillator.frequency.setValueAtTime(frequency, audioContext.currentTime);
+        
+        gainNode.gain.setValueAtTime(volume, audioContext.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + duration);
+
+        oscillator.connect(gainNode);
+        gainNode.connect(audioContext.destination);
+
+        oscillator.start();
+        oscillator.stop(audioContext.currentTime + duration);
+    }
+
+    function playClickSound() {
+        playTone(440, 0.05, 'square', 0.15);
+    }
+
+    function playRentChime() {
+        // A short, ascending arpeggio
+        playTone(523.25, 0.08, 'sine', 0.1); // C5
+        setTimeout(() => playTone(587.33, 0.08, 'sine', 0.1), 80); // D5
+        setTimeout(() => playTone(659.26, 0.08, 'sine', 0.1), 160); // E5
+    }
+
+    function playDemolishThud() {
+        playTone(100, 0.2, 'sawtooth', 0.2);
+    }
+
+    function playWinFanfare() {
+        // A quick, triumphant sequence
+        [660, 784, 987, 1109].forEach((freq, i) => {
+            setTimeout(() => playTone(freq, 0.1, 'triangle', 0.2), i * 100);
+        });
+    }
+
+    function playBankruptcyBuzz() {
+        // Low, dissonant buzz
+        playTone(50, 0.5, 'sawtooth', 0.3);
+    }
+
+    // =========================================================================
+    // GAME LOGIC
+    // =========================================================================
+
+    function updateHUD() {
+        ui.money.textContent = `Money: $${money.toLocaleString()}`;
+        ui.floors.textContent = `Floors: ${floorsBuilt} / 15`;
+        ui.highScore.textContent = `High Score: $${localStorage.getItem('towerTycoonHighScore') || 0}`;
+    }
+
+    function saveHighScore() {
+        const currentHighScore = parseInt(localStorage.getItem('towerTycoonHighScore') || '0');
+        if (money + floorsBuilt * 100 > currentHighScore) {
+            localStorage.setItem('towerTycoonHighScore', money + floorsBuilt * 100);
+        }
+    }
+
+    function handleEconomyTick() {
+        if (gameState !== 'PLAY' || isPaused) return;
+
+        let totalRent = 0;
+        let totalMaintenance = 0;
+
+        // Calculate income and maintenance
+        for (let r = 0; r < GRID_ROWS; r++) {
+            for (let c = 0; c < GRID_COLS; c++) {
+                const floor = grid[r][c];
+                if (floor) {
+                    const type = FLOOR_TYPES[floor.type];
+                    totalRent += type.rent;
+                    totalMaintenance += type.maintenance;
+                }
+            }
+        }
+
+        // Apply changes
+        money += totalRent;
+        money -= totalMaintenance;
+
+        // Visual feedback for rent
+        if (totalRent > 0) {
+            drawFloatingText(canvas.width / 2, CANVAS_HEIGHT / 2, `+$${totalRent}`, '#00FF00');
+        }
+
+        // Check loss condition
+        if (money < 0) {
+            money = 0;
+            endGame('LOSE');
+            playBankruptcyBuzz();
+        }
+    }
+
+    function endGame(status) {
+        gameState = status;
+        isPaused = true;
+        
+        if (status === 'WIN') {
+            const finalScore = money + floorsBuilt * 100;
+            saveHighScore();
+            ui.title.textContent = "TOWER COMPLETE!";
+            ui.message.textContent = `Final Score: $${finalScore.toLocaleString()}`;
+            ui.startButton.textContent = "PLAY AGAIN";
+            playWinFanfare();
+        } else if (status === 'LOSE') {
+            ui.title.textContent = "BANKRUPT";
+            ui.message.textContent = `You ran out of money. Final Score: $${money.toLocaleString()}`;
+            ui.startButton.textContent = "RESTART";
+        }
+
+        ui.overlay.style.display = 'flex';
+    }
+
+    function startGame() {
+        // Reset state
+        money = 3000;
+        floorsBuilt = 0;
+        grid = Array(GRID_ROWS).fill(0).map(() => Array(GRID_COLS).fill(null));
+        gameState = 'PLAY';
+        isPaused = false;
+        ui.overlay.style.display = 'none';
+        updateHUD();
+    }
+
+    // =========================================================================
+    // DRAWING FUNCTIONS
+    // =========================================================================
+
+    function drawBackground() {
+        // Sky Blue Background (already set by CSS, but good practice to ensure)
+        ctx.fillStyle = '#a0d8ff';
+        ctx.fillRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+        // Simple White Clouds
+        ctx.fillStyle = 'white';
+        ctx.beginPath();
+        ctx.arc(50, 50, 30, 0, Math.PI * 2);
+        ctx.arc(150, 70, 40, 0, Math.PI * 2);
+        ctx.arc(250, 60, 35, 0, Math.PI * 2);
+        ctx.fill();
+    }
+
+    function drawGrid() {
+        ctx.strokeStyle = '#aaa';
+        ctx.lineWidth = 1;
+        for (let r = 0; r < GRID_ROWS; r++) {
+            for (let c = 0; c < GRID_COLS; c++) {
+                ctx.strokeRect(c * CELL_SIZE, r * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+            }
+        }
+    }
+
+    function drawFloor(r, c, floorData) {
+        const x = c * CELL_SIZE;
+        const y = r * CELL_SIZE;
+        const type = floorData.type;
+        const def = FLOOR_TYPES[type];
+
+        // 1. Base Structure (Gray)
+        ctx.fillStyle = '#666';
+        ctx.fillRect(x, y, CELL_SIZE, CELL_SIZE);
+        
+        // 2. Floor Color Overlay
+        ctx.fillStyle = def.color;
+        ctx.fillRect(x, y, CELL_SIZE, CELL_SIZE);
+
+        // 3. Floor Number (Left side)
+        ctx.fillStyle = 'white';
+        ctx.font = '14px Arial';
+        ctx.textAlign = 'left';
+        ctx.fillText(`${r + 1}`, x - 10, y + 20);
+
+        // 4. Floor Label (Center)
+        ctx.fillStyle = 'black';
+        ctx.font = '12px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText(def.label, x + CELL_SIZE / 2, y + CELL_SIZE / 2 + 5);
+
+        // 5. Animated People Dots (Apartment/Office)
+        if (def.people > 0) {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+            const centerX = x + CELL_SIZE / 2;
+            const centerY = y + CELL_SIZE / 2;
+            
+            for (let i = 0; i < def.people; i++) {
+                // Simple random jitter animation
+                const jitterX = Math.sin(Date.now() / 300 + i) * 5;
+                const jitterY = Math.cos(Date.now() / 400 + i) * 5;
+                
+                ctx.beginPath();
+                ctx.arc(centerX + jitterX, centerY + jitterY, 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+    }
+
+    function drawHoverHighlight(c) {
+        // Highlight the cell under the mouse
+        ctx.fillStyle = 'rgba(255, 255, 0, 0.3)';
+        ctx.fillRect(c * CELL_SIZE, 0, CELL_SIZE, CANVAS_HEIGHT);
+    }
+
+    function drawFloatingText(x, y, text, color) {
+        ctx.fillStyle = color;
+        ctx.font = 'bold 18px Arial';
+        ctx.textAlign = 'center';
+        ctx.fillText(text, x, y);
+    }
+
+    function draw() {
+        // Clear canvas
+        ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+        drawBackground();
+        drawGrid();
+
+        // Draw floors
+        for (let r = 0; r < GRID_ROWS; r++) {
+            for (let c = 0; c < GRID_COLS; c++) {
+                const floor = grid[r][c];
+                if (floor) {
+                    drawFloor(r, c, floor);
+                }
+            }
+        }
+
+        // Draw hover effect (if mouse is over canvas)
+        if (gameState === 'PLAY' && !isPaused) {
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = event.clientX - rect.left;
+            const mouseY = event.clientY - rect.top;
+            
+            const col = Math.floor(mouseX / CELL_SIZE);
+            const row = Math.floor(mouseY / CELL_SIZE);
+
+            if (col >= 0 && col < GRID_COLS && row >= 0 && row < GRID_ROWS) {
+                if (!grid[row][col]) {
+                    // Empty cell hover
+                    drawHoverHighlight(col);
+                } else {
+                    // Built cell hover (for demolition)
+                    ctx.strokeStyle = 'rgba(255, 0, 0, 0.7)';
+                    ctx.lineWidth = 3;
+                    ctx.strokeRect(col * CELL_SIZE, row * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+                }
+            }
+        }
+    }
+
+    // =========================================================================
+    // INPUT HANDLERS
+    // =========================================================================
+
+    function handleCanvasClick(event) {
+        if (gameState !== 'PLAY' || isPaused) return;
+
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = event.clientX - rect.left;
+        const mouseY = event.clientY - rect.top;
+
+        const c = Math.floor(mouseX / CELL_SIZE);
+        const r = Math.floor(mouseY / CELL_SIZE);
+
+        if (c < 0 || c >= GRID_COLS || r < 0 || r >= GRID_ROWS) return;
+
+        const floor = grid[r][c];
+
+        if (floor) {
+            // DEMOLISH
+            if (floor.type !== 'Lobby') {
+                money += Math.floor(FLOOR_TYPES[floor.type].cost * 0.5);
+                grid[r][c] = null;
+                floorsBuilt--;
+                playDemolishThud();
+                updateHUD();
+            }
+        } else {
+            // BUILD
+            const selectedFloor = FLOOR_TYPES[selectedFloorType];
+            if (money >= selectedFloor.cost) {
+                // Check if building is possible (must be below the highest floor)
+                let maxBuiltRow = -1;
+                for(let i = 0; i < GRID_ROWS; i++) {
+                    for(let j = 0; j < GRID_COLS; j++) {
+                        if (grid[i][j] !== null) {
+                            maxBuiltRow = Math.max(maxBuiltRow, i);
+                        }
+                    }
+                }
+
+                // Check if the target cell is immediately above the highest built floor, or on the ground (row 0)
+                if (maxBuiltRow === -1 || r === maxBuiltRow + 1) {
+                    // Check if we are building on the ground (Lobby only)
+                    if (selectedFloorType === 'Lobby' && r !== 0) return;
+
+                    // Check if the cell is already occupied (shouldn't happen if grid is clean)
+                    if (grid[r][c] === null) {
+                        money -= selectedFloor.cost;
+                        grid[r][c] = { type: selectedFloorType };
+                        floorsBuilt++;
+                        playClickSound();
+                        updateHUD();
+                    }
+                }
+            }
+        }
+        draw();
+    }
+
+    function handleKeyDown(event) {
+        const key = event.key.toUpperCase();
+
+        if (key === 'P') {
+            isPaused = !isPaused;
+            if (isPaused) {
+                // Pause state UI update
+                canvas.style.cursor = 'default';
+            } else {
+                // Resume state UI update
+                canvas.style.cursor = 'pointer';
+            }
+        } else if (key === 'M') {
+            isMuted = !isMuted;
+            // Simple visual feedback for mute
+            console.log(`Muted: ${isMuted}`);
+        } else if (gameState === 'TITLE' && key === 'ENTER') {
+            startGame();
+        }
+    }
+
+    // =========================================================================
+    // GAME LOOP & INITIALIZATION
+    // =========================================================================
+
+    function gameLoop(timestamp) {
+        // 1. Handle Economy Tick (Fixed Timestep)
+        if (gameState === 'PLAY' && !isPaused) {
+            const elapsed = timestamp - lastEconomyTick;
+            if (elapsed >= TICK_INTERVAL) {
+                handleEconomyTick();
+                lastEconomyTick = timestamp;
+            }
+        }
+
+        // 2. Drawing
+        draw();
+
+        // 3. Request next frame
+        requestAnimationFrame(gameLoop);
+    }
+
+    // Event Listeners Setup
+    canvas.addEventListener('click', handleCanvasClick);
+    document.addEventListener('keydown', handleKeyDown);
+
+    // Build Menu Setup
+    document.querySelectorAll('.floor-button').forEach(button => {
+        button.addEventListener('click', () => {
+            selectedFloorType = button.dataset.type;
+            // Update button styling/state if needed
+            document.querySelectorAll('.floor-button').forEach(btn => btn.style.border = '2px solid #333');
+            button.style.border = '3px solid #FF0000'; // Highlight selected
+        });
+    });
+
+    // UI Button Setup
+    ui.startButton.addEventListener('click', startGame);
+
+    // Initialize UI and start loop
+    updateHUD();
+    gameLoop(performance.now());
+
+</script>
+</body>
+</html>

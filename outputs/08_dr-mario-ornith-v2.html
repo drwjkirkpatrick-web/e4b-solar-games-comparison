@@ -1,0 +1,899 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>PILL POPPER</title>
+    <style>
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            background-color: #f0f8ff; /* Light background */
+            font-family: 'Arial', sans-serif;
+            color: #333;
+            user-select: none;
+            overflow: hidden;
+        }
+        #game-container {
+            display: flex;
+            border: 8px solid #a0c4ff;
+            border-radius: 15px;
+            box-shadow: 0 10px 30px rgba(0, 0, 0, 0.2);
+            background-color: #ffffff;
+        }
+        #game-canvas {
+            background-color: #e0f7fa; /* Light blue glass effect */
+            border-right: 2px solid #ccc;
+        }
+        #side-panel {
+            width: 200px;
+            padding: 20px;
+            display: flex;
+            flex-direction: column;
+            gap: 15px;
+            background-color: #f9f9f9;
+            border-left: 1px solid #ddd;
+        }
+        .stat-box {
+            padding: 10px;
+            border-radius: 8px;
+            background-color: #fff;
+            border: 1px solid #ddd;
+        }
+        .stat-box h4 {
+            margin: 0 0 5px 0;
+            font-size: 14px;
+            color: #666;
+        }
+        .stat-value {
+            font-size: 24px;
+            font-weight: bold;
+            color: #333;
+        }
+        #next-pill-preview {
+            width: 100%;
+            height: 60px;
+            background-color: #eee;
+            border: 2px dashed #aaa;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            border-radius: 5px;
+            margin-top: 10px;
+        }
+        #message-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.6);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            z-index: 100;
+            color: white;
+            font-size: 30px;
+            transition: opacity 0.3s;
+        }
+        #message-overlay h1 {
+            font-size: 60px;
+            margin: 0;
+        }
+        #message-overlay button {
+            padding: 15px 30px;
+            font-size: 20px;
+            cursor: pointer;
+            margin-top: 20px;
+            border: none;
+            border-radius: 10px;
+            background-color: #4CAF50;
+            color: white;
+            transition: background-color 0.2s;
+        }
+        #message-overlay button:hover {
+            background-color: #45a049;
+        }
+        #pause-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-color: rgba(0, 0, 0, 0.5);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            z-index: 99;
+            color: white;
+            font-size: 40px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <canvas id="game-canvas" width="240" height="480"></canvas>
+    <div id="side-panel">
+        <div class="stat-box">
+            <h4>SCORE</h4>
+            <div id="score" class="stat-value">0</div>
+        </div>
+        <div class="stat-box">
+            <h4>LEVEL</h4>
+            <div id="level" class="stat-value">1</div>
+        </div>
+        <div class="stat-box">
+            <h4>VIRUSES LEFT</h4>
+            <div id="viruses-left" class="stat-value">4</div>
+        </div>
+        <div class="stat-box">
+            <h4>HIGH SCORE</h4>
+            <div id="high-score" class="stat-value">0</div>
+        </div>
+        <div class="stat-box">
+            <h4>NEXT PILL</h4>
+            <div id="next-pill-preview"></div>
+        </div>
+        <div id="audio-controls" class="stat-box">
+            <h4>AUDIO</h4>
+            <button id="mute-btn">MUTE (M)</button>
+        </div>
+    </div>
+</div>
+
+<div id="message-overlay">
+    <h1 id="overlay-title">PILL POPPER</h1>
+    <p id="overlay-text">PRESS SPACE TO START</p>
+    <button id="start-button">START GAME</button>
+</div>
+
+<div id="pause-overlay">
+    <h1>PAUSED</h1>
+    <p>Press P or Space to Resume</p>
+</div>
+
+<script>
+// ====================================================================
+// CORE GAME CONSTANTS & SETUP
+// ====================================================================
+
+const CANVAS_WIDTH = 240;
+const CANVAS_HEIGHT = 480;
+const CELL_SIZE = 30;
+const COLS = 8;
+const ROWS = 16;
+
+const COLORS = {
+    RED: '#ff4d4d',
+    BLUE: '#4d79ff',
+    YELLOW: '#ffd700',
+    GREEN: '#4dff4d',
+    EMPTY: '#e0f7fa',
+    WALL: '#a0c4ff',
+    VIRUS_RED: '#ff0000',
+    VIRUS_BLUE: '#0000ff',
+    VIRUS_YELLOW: '#ffff00',
+    VIRUS_GREEN: '#00ff00',
+    GLOSS: 'rgba(255, 255, 255, 0.5)'
+};
+
+const PILL_COLORS = [COLORS.RED, COLORS.BLUE, COLORS.YELLOW, COLORS.GREEN];
+
+// Game State
+let gameState = 'TITLE'; // TITLE, RUNNING, PAUSED, GAMEOVER
+let score = 0;
+let level = 1;
+let virusesLeft = 4;
+let highScore = 0;
+let isMuted = false;
+let lastTime = 0;
+let fixedTimeStep = 1000 / 60; // 60 FPS
+let accumulator = 0;
+
+// Game Objects
+let grid = []; // 8x16 array storing pill color indices (0-3) or null
+let activePill = null;
+let nextPill = null;
+let viruses = []; // Array of virus objects
+let particles = [];
+
+// Input handling
+const keys = {};
+
+// ====================================================================
+// AUDIO ENGINE (Web Audio API)
+// ====================================================================
+
+const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+let masterGain = audioContext.createGain();
+masterGain.gain.value = 1.0;
+
+function playSound(type, frequency = 440, duration = 0.1, volume = 0.5) {
+    if (isMuted || audioContext.state === 'suspended') return;
+
+    const oscillator = audioContext.createOscillator();
+    const gainNode = audioContext.createGain();
+
+    oscillator.connect(gainNode);
+    gainNode.connect(masterGain);
+
+    oscillator.frequency.setValueAtTime(frequency, audioContext.currentTime);
+    gainNode.gain.setValueAtTime(volume, audioContext.currentTime);
+    gainNode.gain.exponentialRampToValue(0.001, audioContext.currentTime + duration);
+
+    oscillator.start(audioContext.currentTime);
+    oscillator.stop(audioContext.currentTime + duration);
+}
+
+const SOUND_MAP = {
+    ROTATE: () => playSound('sine', 880, 0.08, 0.3),
+    LAND: () => playSound('square', 120, 0.2, 0.4),
+    CLEAR: () => {
+        // Arpeggio simulation
+        [440, 554.37, 660.26, 770.0]
+            .forEach((f, i) => {
+                setTimeout(() => playSound('sine', f, 0.1, 0.3), i * 50);
+            });
+    },
+    VIRUS_CHIME: () => playSound('triangle', 1000, 0.3, 0.5),
+    GAMEOVER: () => {
+        // Descending tone
+        [440, 330, 220, 110].forEach((f, i) => {
+            setTimeout(() => playSound('sawtooth', f, 0.5, 0.4 - (i * 0.1)), i * 100);
+        });
+    },
+    LEVEL_UP: () => playSound('sine', 880, 0.5, 0.6)
+};
+
+// ====================================================================
+// GAME OBJECT DEFINITIONS
+// ====================================================================
+
+class Pill {
+    constructor(colorIndex, x, y, rotation = 0) {
+        this.colorIndex = colorIndex;
+        this.x = x; // Top-left coordinate of the pill's bounding box
+        this.y = y;
+        this.rotation = rotation; // 0: Horizontal (2 cells wide), 1: Vertical (2 cells high)
+        this.width = (rotation === 0) ? 2 : 1;
+        this.height = (rotation === 0) ? 1 : 2;
+        this.cells = [];
+        this.updateCells();
+    }
+
+    updateCells() {
+        this.cells = [];
+        if (this.rotation === 0) { // Horizontal
+            this.cells = [{ x: this.x, y: this.y }, { x: this.x + 1, y: this.y }];
+        } else { // Vertical
+            this.cells = [{ x: this.x, y: this.y }, { x: this.x, y: this.y + 1 }];
+        }
+    }
+
+    rotate() {
+        this.rotation = (this.rotation + 1) % 2;
+        this.updateCells();
+        SOUND_MAP.ROTATE();
+    }
+
+    move(dx) {
+        const newX = this.x + dx;
+        return this.checkCollision(newX, this.y);
+    }
+
+    softDrop() {
+        const newY = this.y + 1;
+        return this.checkCollision(this.x, newY);
+    }
+
+    checkCollision(newX, newY) {
+        for (const cell of this.cells) {
+            let cx = cell.x;
+            let cy = cell.y;
+
+            if (newX !== undefined) cx += newX;
+            if (newY !== undefined) cy += newY;
+
+            // Check boundaries
+            if (cx < 0 || cx >= COLS || cy >= ROWS) return true;
+            if (cy < 0) continue; // Ignore check above the grid
+
+            // Check collision with locked pieces
+            if (grid[cy] && grid[cy][cx] !== null) {
+                // Collision detected, but only if the new cell is occupied
+                return true;
+            }
+        }
+        return false;
+    }
+}
+
+class Virus {
+    constructor(colorIndex, startX, startY) {
+        this.colorIndex = colorIndex;
+        this.x = startX;
+        this.y = startY;
+        this.radius = 10 + Math.random() * 5;
+        this.eyes = [];
+        for(let i=0; i<2; i++) {
+            this.eyes.push({x: this.x + (Math.random() - 0.5) * 5, y: this.y + (Math.random() - 0.5) * 5});
+        }
+    }
+}
+
+// ====================================================================
+// GAME LOGIC FUNCTIONS
+// ====================================================================
+
+function initializeGrid() {
+    grid = Array(ROWS).fill(0).map(() => Array(COLS).fill(null));
+}
+
+function spawnNewPill() {
+    const colorIndex = Math.floor(Math.random() * PILL_COLORS.length);
+    
+    // Try to spawn horizontally first
+    let newPill = new Pill(colorIndex, Math.floor(COLS / 2) - 1, 0, 0);
+    
+    // Check if the spawn location is blocked
+    if (newPill.checkCollision(0, 0)) {
+        // If blocked, try vertically
+        newPill = new Pill(colorIndex, Math.floor(COLS / 2), 0, 1);
+        if (newPill.checkCollision(0, 0)) {
+            // Game Over
+            gameOver();
+            return null;
+        }
+    }
+
+    activePill = newPill;
+    nextPill = Pill(Math.floor(Math.random() * PILL_COLORS.length), 0, 0, 0);
+    return activePill;
+}
+
+function lockPill() {
+    if (!activePill) return;
+
+    for (const cell of activePill.cells) {
+        const { x, y } = cell;
+        if (y >= 0 && y < ROWS && x >= 0 && x < COLS) {
+            grid[y][x] = activePill.colorIndex;
+        }
+    }
+
+    SOUND_MAP.LAND();
+    
+    // Check for matches and clear
+    let matchesFound = checkAndClearLines();
+    
+    // Drop remaining pieces (gravity)
+    applyGravity();
+
+    // Spawn next pill
+    spawnNewPill();
+}
+
+function checkAndClearLines() {
+    let clearedCells = [];
+    let scoreMultiplier = 1;
+
+    // 1. Check Rows
+    for (let y = 0; y < ROWS; y++) {
+        for (let x = 0; x < COLS; x++) {
+            const color = grid[y][x];
+            if (color !== null) {
+                // Check horizontal matches
+                let matches = 1;
+                for (let k = 1; x + k < COLS && grid[y][x + k] === color; k++) {
+                    matches++;
+                }
+                if (matches >= 4) {
+                    for (let m = 0; m < matches; m++) {
+                        clearedCells.push({ x: x + m, y: y });
+                    }
+                    scoreMultiplier *= matches;
+                }
+            }
+        }
+    }
+
+    // 2. Check Columns
+    for (let x = 0; x < COLS; x++) {
+        for (let y = 0; y < ROWS; y++) {
+            const color = grid[y][x];
+            if (color !== null) {
+                // Check vertical matches
+                let matches = 1;
+                for (let k = 1; y + k < ROWS && grid[y + k][x] === color; k++) {
+                    matches++;
+                }
+                if (matches >= 4) {
+                    for (let m = 0; m < matches; m++) {
+                        // Only add if not already marked for horizontal clear
+                        const cell = { x: x, y: y + m };
+                        if (!clearedCells.some(c => c.x === cell.x && c.y === cell.y)) {
+                            clearedCells.push(cell);
+                        }
+                    }
+                    scoreMultiplier *= matches;
+                }
+            }
+        }
+    }
+
+    if (clearedCells.length > 0) {
+        // Clear cells
+        clearedCells.forEach(cell => {
+            grid[cell.y][cell.x] = null;
+        });
+
+        // Scoring
+        const baseScore = clearedCells.length * 100;
+        score += Math.round(baseScore * scoreMultiplier);
+        
+        // Chain reaction bonus (simple implementation: score * 2 for chains)
+        if (clearedCells.length > 0) {
+            score += Math.round(score * 0.5); // 50% bonus for chain
+        }
+
+        SOUND_MAP.CLEAR();
+        return true;
+    }
+    return false;
+}
+
+function applyGravity() {
+    let moved = false;
+    for (let x = 0; x < COLS; x++) {
+        let writeRow = ROWS - 1;
+        for (let y = ROWS - 1; y >= 0; y--) {
+            if (grid[y][x] !== null) {
+                if (y !== writeRow) {
+                    grid[writeRow][x] = grid[y][x];
+                    grid[y][x] = null;
+                    moved = true;
+                }
+                writeRow--;
+            }
+        }
+    }
+    return moved;
+}
+
+function updateViruses() {
+    // Simple movement: viruses drift slightly down and jitter
+    for (let i = viruses.length - 1; i >= 0; i--) {
+        const v = viruses[i];
+        v.y += 0.05 + (level * 0.005); // Speed increases with level
+        
+        // Jitter
+        v.x += (Math.random() - 0.5) * 0.5;
+        
+        // Check if virus hits the bottom
+        if (v.y > ROWS - 1 - v.radius) {
+            viruses.splice(i, 1);
+            SOUND_MAP.VIRUS_CHIME();
+            virusesLeft--;
+            updateUI();
+        }
+    }
+}
+
+function checkVirusClear() {
+    if (virusesLeft <= 0) {
+        level++;
+        virusesLeft = Math.min(8, level); // Max 8 viruses
+        
+        // Increase difficulty: speed up fall rate
+        // (Handled implicitly by the updateViruses speed logic)
+        
+        SOUND_MAP.LEVEL_UP();
+        updateUI();
+        // Clear the board slightly for a level transition feel
+        grid = Array(ROWS).fill(0).map(() => Array(COLS).fill(null));
+        return true;
+    }
+    return false;
+}
+
+// ====================================================================
+// DRAWING FUNCTIONS
+// ====================================================================
+
+function drawGrid() {
+    const ctx = canvas.getContext('2d');
+    ctx.strokeStyle = '#ccc';
+    ctx.lineWidth = 1;
+
+    for (let y = 0; y < ROWS; y++) {
+        for (let x = 0; x < COLS; x++) {
+            // Draw cell background
+            ctx.fillStyle = '#e0f7fa';
+            ctx.fillRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+            
+            // Draw grid lines
+            ctx.strokeRect(x * CELL_SIZE, y * CELL_SIZE, CELL_SIZE, CELL_SIZE);
+        }
+    }
+}
+
+function drawBottle() {
+    const ctx = canvas.getContext('2d');
+    const centerX = CANVAS_WIDTH / 2;
+    const bottomY = CANVAS_HEIGHT - 20;
+    const topY = 0;
+    const width = CANVAS_WIDTH - 40;
+    const halfWidth = width / 2;
+
+    // Draw glass body (light blue)
+    ctx.fillStyle = COLORS.WALL;
+    ctx.beginPath();
+    // Top opening (slightly rounded)
+    ctx.moveTo(centerX - halfWidth / 2, topY);
+    ctx.lineTo(centerX + halfWidth / 2, topY);
+    // Sides
+    ctx.lineTo(centerX + halfWidth, bottomY);
+    ctx.lineTo(centerX - halfWidth, bottomY);
+    ctx.closePath();
+    ctx.fill();
+
+    // Add subtle glass highlight
+    ctx.strokeStyle = 'rgba(255, 255, 255, 0.4)';
+    ctx.lineWidth = 3;
+    ctx.beginPath();
+    ctx.moveTo(centerX + halfWidth / 2, topY);
+    ctx.lineTo(centerX + halfWidth, bottomY);
+    ctx.stroke();
+}
+
+function drawPill(p, isPreview = false) {
+    const ctx = canvas.getContext('2d');
+    const color = PILL_COLORS[p.colorIndex];
+    const isLocked = grid[p.cells[0].y] && grid[p.cells[0].y][p.cells[0].x] === p.colorIndex;
+
+    // Draw cells
+    p.cells.forEach(cell => {
+        const x = cell.x * CELL_SIZE;
+        const y = cell.y * CELL_SIZE;
+
+        // Pill body (rounded rectangle)
+        ctx.fillStyle = color;
+        ctx.beginPath();
+        ctx.roundRect(x + 2, y + 2, CELL_SIZE - 4, CELL_SIZE - 4, 6);
+        ctx.fill();
+
+        // Gloss/Highlight
+        ctx.fillStyle = COLORS.GLOSS;
+        ctx.beginPath();
+        ctx.arc(x + 10, y + 10, 5, 0, Math.PI * 2);
+        ctx.fill();
+        
+        // Border
+        ctx.strokeStyle = '#333';
+        ctx.lineWidth = 1;
+        ctx.stroke();
+    });
+}
+
+function drawVirus(v) {
+    const ctx = canvas.getContext('2d');
+    const color = PILL_COLORS[v.colorIndex];
+
+    // Draw main blob
+    ctx.fillStyle = color;
+    ctx.beginPath();
+    ctx.arc(v.x * CELL_SIZE + CELL_SIZE / 2, v.y * CELL_SIZE + CELL_SIZE / 2, v.radius, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Draw eyes
+    ctx.fillStyle = 'white';
+    ctx.beginPath();
+    ctx.arc(v.eyes[0].x * CELL_SIZE + CELL_SIZE / 2, v.eyes[0].y * CELL_SIZE + CELL_SIZE / 2, 3, 0, Math.PI * 2);
+    ctx.arc(v.eyes[1].x * CELL_SIZE + CELL_SIZE / 2, v.eyes[1].y * CELL_SIZE + CELL_SIZE / 2, 3, 0, Math.PI * 2);
+    ctx.fill();
+    
+    // Pupils
+    ctx.fillStyle = 'black';
+    ctx.beginPath();
+    ctx.arc(v.eyes[0].x * CELL_SIZE + CELL_SIZE / 2, v.eyes[0].y * CELL_SIZE + CELL_SIZE / 2, 1, 0, Math.PI * 2);
+    ctx.arc(v.eyes[1].x * CELL_SIZE + CELL_SIZE / 2, v.eyes[1].y * CELL_SIZE + CELL_SIZE / 2, 1, 0, Math.PI * 2);
+    ctx.fill();
+}
+
+function drawParticles() {
+    const ctx = canvas.getContext('2d');
+    particles.forEach(p => {
+        ctx.fillStyle = p.color;
+        ctx.globalAlpha = p.alpha;
+        ctx.fillRect(p.x, p.y, p.size, p.size);
+        ctx.globalAlpha = 1.0;
+    });
+}
+
+function draw() {
+    const ctx = canvas.getContext('2d');
+    ctx.clearRect(0, 0, CANVAS_WIDTH, CANVAS_HEIGHT);
+
+    // 1. Draw Background elements
+    drawBottle();
+    drawGrid();
+
+    // 2. Draw Viruses
+    viruses.forEach(drawVirus);
+
+    // 3. Draw Locked Pills (Grid)
+    for (let y = 0; y < ROWS; y++) {
+        for (let x = 0; x < COLS; x++) {
+            const colorIndex = grid[y][x];
+            if (colorIndex !== null) {
+                // Draw a static representation of the locked piece
+                ctx.fillStyle = PILL_COLORS[colorIndex];
+                ctx.fillRect(x * CELL_SIZE + 2, y * CELL_SIZE + 2, CELL_SIZE - 4, CELL_SIZE - 4);
+                // Gloss
+                ctx.fillStyle = COLORS.GLOSS;
+                ctx.fillRect(x * CELL_SIZE + 10, y * CELL_SIZE + 10, 5, 5);
+            }
+        }
+    }
+
+    // 4. Draw Active Pill
+    if (activePill) {
+        drawPill(activePill);
+    }
+
+    // 5. Draw Next Pill Preview
+    const previewCanvas = document.getElementById('next-pill-preview');
+    previewCanvas.innerHTML = '';
+    const previewCtx = previewCanvas.getContext('2d');
+    const previewSize = 50;
+    const previewX = (previewCanvas.width - previewSize) / 2;
+    const previewY = (previewCanvas.height - previewSize) / 2;
+
+    if (nextPill) {
+        const color = PILL_COLORS[nextPill.colorIndex];
+        previewCtx.fillStyle = color;
+        previewCtx.fillRect(previewX, previewY, previewSize, previewSize);
+        // Gloss
+        previewCtx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+        previewCtx.fillRect(previewX + 10, previewY + 10, 10, 10);
+    }
+
+    // 6. Draw Particles
+    drawParticles();
+}
+
+// ====================================================================
+// GAME LOOP & TIMESTEP
+// ====================================================================
+
+function update(deltaTime) {
+    if (gameState !== 'RUNNING') return;
+
+    // 1. Update Viruses (Physics)
+    updateViruses();
+
+    // 2. Update Active Pill (Gravity/Falling)
+    if (activePill) {
+        const fallSpeed = (1 / (60 / (1 / (1 + level * 0.01)))); // Base speed adjusted by level
+        const fallDistance = fallSpeed * deltaTime;
+        
+        // Calculate how many cells it falls
+        const fallCells = Math.floor(fallDistance / (fixedTimeStep / 1000) * 60); 
+
+        if (fallCells > 0) {
+            const newY = activePill.y + fallCells;
+            if (activePill.checkCollision(0, newY)) {
+                // Collision detected, lock the pill
+                activePill.y = newY - 1;
+                lockPill();
+            } else {
+                activePill.y = newY;
+            }
+        }
+    }
+
+    // 3. Check for Virus Clear
+    checkVirusClear();
+}
+
+function gameLoop(timestamp) {
+    const deltaTime = timestamp - lastTime;
+    lastTime = timestamp;
+
+    accumulator += deltaTime;
+
+    // Fixed Timestep Update
+    while (accumulator >= fixedTimeStep) {
+        update(fixedTimeStep);
+        accumulator -= fixedTimeStep;
+    }
+
+    // Rendering
+    draw();
+    
+    // Request next frame
+    requestAnimationFrame(gameLoop);
+}
+
+// ====================================================================
+// INPUT HANDLERS
+// ====================================================================
+
+function handleInput() {
+    if (gameState !== 'RUNNING') return;
+
+    if (keys['ArrowLeft']) {
+        if (activePill && activePill.move(-1)) {
+            activePill.x -= 1;
+            SOUND_MAP.ROTATE(); // Reusing rotation sound for movement blip
+        }
+    }
+    if (keys['ArrowRight']) {
+        if (activePill && activePill.move(1)) {
+            activePill.x += 1;
+            SOUND_MAP.ROTATE();
+        }
+    }
+    if (keys['ArrowDown']) {
+        if (activePill && activePill.softDrop()) {
+            activePill.y += 1;
+            SOUND_MAP.ROTATE(); // Soft drop sound
+        }
+    }
+    if (keys[' ']) { // Spacebar for rotation
+        if (activePill) {
+            activePill.rotate();
+        }
+    }
+    if (keys['p']) { // Pause
+        togglePause();
+    }
+}
+
+// ====================================================================
+// UI & STATE MANAGEMENT
+// ====================================================================
+
+function updateUI() {
+    document.getElementById('score').textContent = score;
+    document.getElementById('level').textContent = level;
+    document.getElementById('viruses-left').textContent = virusesLeft;
+    document.getElementById('high-score').textContent = highScore;
+    
+    const nextPillDiv = document.getElementById('next-pill-preview');
+    nextPillDiv.innerHTML = '';
+    if (nextPill) {
+        const color = PILL_COLORS[nextPill.colorIndex];
+        const previewSize = 50;
+        const previewX = (previewCanvas.width - previewSize) / 2;
+        const previewY = (previewCanvas.height - previewSize) / 2;
+        
+        const previewCtx = previewCanvas.getContext('2d');
+        previewCtx.fillStyle = color;
+        previewCtx.fillRect(previewX, previewY, previewSize, previewSize);
+        // Gloss
+        previewCtx.fillStyle = 'rgba(255, 255, 255, 0.5)';
+        previewCtx.fillRect(previewX + 10, previewY + 10, 10, 10);
+    }
+}
+
+function resetGame() {
+    score = 0;
+    level = 1;
+    virusesLeft = 4;
+    initializeGrid();
+    
+    // Clear existing viruses and spawn new ones
+    viruses = [];
+    const virusColors = [0, 1, 2, 3];
+    for (let i = 0; i < 4; i++) {
+        const colorIndex = virusColors[i];
+        // Spawn in the bottom half of the grid
+        const startX = Math.random() * (COLS - 2) + 1;
+        const startY = ROWS - 4 - Math.floor(Math.random() * 4);
+        viruses.push(new Virus(colorIndex, startX, startY));
+    }
+
+    spawnNewPill();
+    nextPill = Pill(Math.floor(Math.random() * PILL_COLORS.length), 0, 0, 0);
+    
+    updateUI();
+    gameState = 'RUNNING';
+    document.getElementById('message-overlay').style.display = 'none';
+    document.getElementById('pause-overlay').style.display = 'none';
+    
+    // Start the loop if not already running
+    if (gameState === 'RUNNING') {
+        requestAnimationFrame(gameLoop);
+    }
+}
+
+function startGame() {
+    if (gameState === 'TITLE' || gameState === 'GAMEOVER') {
+        resetGame();
+    }
+}
+
+function togglePause() {
+    if (gameState === 'RUNNING') {
+        gameState = 'PAUSED';
+        document.getElementById('pause-overlay').style.display = 'flex';
+    } else if (gameState === 'PAUSED') {
+        gameState = 'RUNNING';
+        document.getElementById('pause-overlay').style.display = 'none';
+        // Resume loop (it's already running, just state changed)
+    }
+}
+
+function gameOver() {
+    gameState = 'GAMEOVER';
+    SOUND_MAP.GAMEOVER();
+    
+    if (score > highScore) {
+        highScore = score;
+        localStorage.setItem('pillPopperHighScore', highScore);
+    }
+    
+    document.getElementById('overlay-title').textContent = "GAME OVER";
+    document.getElementById('overlay-text').textContent = `FINAL SCORE: ${score}`;
+    document.getElementById('start-button').textContent = "RESTART";
+    document.getElementById('message-overlay').style.display = 'flex';
+}
+
+// ====================================================================
+// INITIALIZATION & EVENT LISTENERS
+// ====================================================================
+
+const canvas = document.getElementById('game-canvas');
+const previewCanvas = document.getElementById('next-pill-preview');
+
+window.addEventListener('keydown', (e) => {
+    keys[e.key] = true;
+    
+    if (e.key === ' ' && gameState !== 'RUNNING') {
+        e.preventDefault();
+        if (gameState === 'TITLE' || gameState === 'GAMEOVER') {
+            startGame();
+        } else if (gameState === 'PAUSED') {
+            togglePause();
+        }
+    }
+    
+    if (e.key === 'p' || e.key === 'P') {
+        togglePause();
+    }
+    
+    handleInput();
+});
+
+window.addEventListener('keyup', (e) => {
+    keys[e.key] = false;
+});
+
+document.getElementById('start-button').addEventListener('click', startGame);
+document.getElementById('mute-btn').addEventListener('click', () => {
+    isMuted = !isMuted;
+    document.getElementById('mute-btn').textContent = isMuted ? "UNMUTE (M)" : "MUTE (M)";
+});
+
+// Load High Score
+document.addEventListener('DOMContentLoaded', () => {
+    const savedScore = localStorage.getItem('pillPopperHighScore');
+    if (savedScore) {
+        highScore = parseInt(savedScore);
+    }
+    updateUI();
+    draw(); // Initial draw of the empty state
+});
+
+</script>
+</body>
+</html>

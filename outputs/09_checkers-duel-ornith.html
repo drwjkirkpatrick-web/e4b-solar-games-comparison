@@ -1,0 +1,945 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CHECKERS DUEL</title>
+    <style>
+        @import url('https://fonts.googleapis.com/css?family=Cinzel:wght@700&family=Roboto:wght@400;700&display=swap');
+        body {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #1a1a2e;
+            color: #e0e0e0;
+            font-family: 'Roboto', sans-serif;
+            margin: 0;
+            padding: 20px;
+            overflow: hidden;
+        }
+        #game-container {
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background: #2a2a3e;
+            padding: 20px;
+            border-radius: 15px;
+            box-shadow: 0 0 30px rgba(0, 0, 0, 0.5);
+        }
+        h1 {
+            font-family: 'Cinzel', serif;
+            color: #ffd700;
+            text-shadow: 2px 2px 4px #000;
+            margin-bottom: 10px;
+        }
+        #hud {
+            display: flex;
+            justify-content: space-between;
+            width: 640px;
+            margin-bottom: 15px;
+            padding: 10px;
+            background: #333;
+            border-radius: 8px;
+            font-size: 1.2em;
+        }
+        #canvas-container {
+            position: relative;
+            width: 640px;
+            height: 640px;
+            border: 5px solid #3d2817;
+            box-shadow: 0 0 15px rgba(0, 0, 0, 0.7);
+        }
+        canvas {
+            display: block;
+            background-color: #b58863; /* Default light square */
+        }
+        #controls {
+            margin-top: 20px;
+            display: flex;
+            gap: 10px;
+        }
+        button {
+            padding: 10px 20px;
+            font-size: 1em;
+            cursor: pointer;
+            border: none;
+            border-radius: 5px;
+            transition: background 0.3s;
+            font-weight: bold;
+        }
+        #start-button {
+            background-color: #d63031;
+            color: white;
+        }
+        #start-button:hover {
+            background-color: #a82525;
+        }
+        #mute-button {
+            background-color: #555;
+            color: white;
+        }
+        #mute-button.muted {
+            background-color: #888;
+        }
+        #history-log {
+            margin-top: 20px;
+            width: 640px;
+            max-height: 150px;
+            overflow-y: auto;
+            padding: 10px;
+            background: #111;
+            border-radius: 8px;
+            font-size: 0.9em;
+            color: #ccc;
+        }
+        .game-over-screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.85);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            font-family: 'Cinzel', serif;
+            color: #ffd700;
+            z-index: 100;
+            display: none;
+        }
+        .game-over-screen h2 {
+            font-size: 4em;
+            margin: 0;
+            animation: pulse 1s infinite alternate;
+        }
+        .game-over-screen p {
+            font-size: 1.5em;
+            margin: 10px 0 30px 0;
+        }
+        @keyframes pulse {
+            from { transform: scale(1); }
+            to { transform: scale(1.05); }
+        }
+    </style>
+</head>
+<body>
+
+    <h1>CHECKERS DUEL</h1>
+
+    <div id="game-container">
+        <div id="hud">
+            <div>Turn: <span id="turn-display">Black</span></div>
+            <div>Red Pieces: <span id="red-count">0</span></div>
+            <div>Black Pieces: <span id="black-count">0</span></div>
+            <div>Move #: <span id="move-count">0</span></div>
+        </div>
+
+        <div id="canvas-container">
+            <canvas id="gameCanvas" width="640" height="640"></canvas>
+            <div id="game-over-screen" class="game-over-screen">
+                <h2 id="winner-text"></h2>
+                <p>Game Over!</p>
+                <button id="play-again-button" style="background-color: #2d3436; color: white;">Play Again</button>
+            </div>
+        </div>
+
+        <div id="controls">
+            <button id="start-button">Start Game</button>
+            <button id="mute-button">Mute</button>
+        </div>
+
+        <div id="history-log">
+            Move History:
+        </div>
+    </div>
+
+    <script>
+        // =====================================================================
+        // CONFIGURATION & CONSTANTS
+        // =====================================================================
+        const CANVAS_SIZE = 640;
+        const SQUARE_SIZE = 80;
+        const BOARD_SIZE = 8;
+
+        // Colors
+        const COLOR_LIGHT = '#f0d9b5';
+        const COLOR_DARK = '#b58863';
+        const COLOR_RED = '#d63031';
+        const COLOR_BLACK = '#2d3436';
+        const COLOR_SELECTED = '#ffd700';
+        const COLOR_MOVE_DOT = 'rgba(0,255,0,0.5)';
+        const COLOR_LAST_MOVE = '#74b9ff';
+        const COLOR_BORDER = '#3d2817';
+        const COLOR_KING = '#ffd700';
+
+        // Piece Codes
+        const EMPTY = 0;
+        const RED = 1;
+        const RED_KING = 2;
+        const BLACK = -1;
+        const BLACK_KING = -2;
+
+        // Game State
+        let board = [];
+        let currentPlayer = BLACK; // Black (CPU) starts
+        let selectedPiece = null; // {r, c}
+        let legalMoves = []; // Array of {from: {r, c}, to: {r, c}, captures: []}
+        let isGameOver = true;
+        let moveCount = 0;
+        let moveHistory = [];
+        let isMuted = false;
+        let animationQueue = [];
+        let isAnimating = false;
+
+        // Audio Context
+        let audioContext;
+        let isAudioEnabled = true;
+
+        // =====================================================================
+        // INITIALIZATION & SETUP
+        // =====================================================================
+
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const startButton = document.getElementById('start-button');
+        const muteButton = document.getElementById('mute-button');
+        const historyLog = document.getElementById('history-log');
+        const gameOverScreen = document.getElementById('game-over-screen');
+        const winnerText = document.getElementById('winner-text');
+        const playAgainButton = document.getElementById('play-again-button');
+
+        function initBoard() {
+            board = Array(BOARD_SIZE).fill(0).map(() => Array(BOARD_SIZE).fill(EMPTY));
+
+            // Black pieces (Top, rows 0-2, dark squares)
+            // Dark squares are (r+c)%2 == 1 for Black's perspective (top)
+            for (let r = 0; r < 3; r++) {
+                for (let c = 0; c < 8; c++) {
+                    if ((r + c) % 2 === 1) {
+                        board[r][c] = BLACK;
+                    }
+                }
+            }
+
+            // Red pieces (Bottom, rows 5-7, dark squares)
+            // Dark squares are (r+c)%2 == 0 for Red's perspective (bottom)
+            for (let r = 5; r < 8; r++) {
+                for (let c = 0; c < 8; c++) {
+                    if ((r + c) % 2 === 0) {
+                        board[r][c] = RED;
+                    }
+                }
+            }
+
+            selectedPiece = null;
+            legalMoves = [];
+            isGameOver = false;
+            moveCount = 0;
+            moveHistory = [];
+            updateHUD();
+            render();
+        }
+
+        function startGame() {
+            if (!isGameOver) return;
+            initBoard();
+            startButton.textContent = "Game Running...";
+            startButton.disabled = true;
+            historyLog.innerHTML = "Move History:<br>";
+            
+            // Start the AI turn immediately if it's Black's turn
+            if (currentPlayer === BLACK) {
+                setTimeout(cpuTurn, 500);
+            }
+        }
+
+        function resetGame() {
+            isGameOver = true;
+            initBoard();
+            startButton.textContent = "Start Game";
+            startButton.disabled = false;
+            gameOverScreen.style.display = 'none';
+        }
+
+        // =====================================================================
+        // RENDERING & VISUALS
+        // =====================================================================
+
+        function drawBoard() {
+            ctx.clearRect(0, 0, CANVAS_SIZE, CANVAS_SIZE);
+            
+            for (let r = 0; r < BOARD_SIZE; r++) {
+                for (let c = 0; c < BOARD_SIZE; c++) {
+                    let color = (r + c) % 2 === 0 ? COLOR_LIGHT : COLOR_DARK;
+                    ctx.fillStyle = color;
+                    ctx.fillRect(c * SQUARE_SIZE, r * SQUARE_SIZE, SQUARE_SIZE, SQUARE_SIZE);
+
+                    // Draw grid lines
+                    ctx.strokeStyle = COLOR_BORDER;
+                    ctx.strokeRect(c * SQUARE_SIZE, r * SQUARE_SIZE, SQUARE_SIZE, SQUARE_SIZE);
+                }
+            }
+        }
+
+        function drawPiece(r, c, piece) {
+            const x = c * SQUARE_SIZE + SQUARE_SIZE / 2;
+            const y = r * SQUARE_SIZE + SQUARE_SIZE / 2;
+            const radius = SQUARE_SIZE * 0.35;
+            
+            let color = '';
+            let kingText = '';
+
+            if (piece === RED || piece === RED_KING) {
+                color = COLOR_RED;
+                if (piece === RED_KING) {
+                    kingText = 'K';
+                }
+            } else if (piece === BLACK || piece === BLACK_KING) {
+                color = COLOR_BLACK;
+                if (piece === BLACK_KING) {
+                    kingText = 'K';
+                }
+            }
+
+            // Draw circle
+            ctx.beginPath();
+            ctx.arc(x, y, radius, 0, Math.PI * 2);
+            ctx.fillStyle = color;
+            ctx.fill();
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 3;
+            ctx.stroke();
+
+            // Draw King indicator
+            if (kingText) {
+                ctx.fillStyle = COLOR_KING;
+                ctx.font = `${SQUARE_SIZE * 0.4}px 'Cinzel'`;
+                ctx.textAlign = 'center';
+                ctx.textBaseline = 'middle';
+                ctx.fillText(kingText, x, y + 5);
+            }
+        }
+
+        function drawHighlights() {
+            // 1. Draw Selection Highlight
+            if (selectedPiece) {
+                const { r, c } = selectedPiece;
+                ctx.fillStyle = 'rgba(255, 215, 0, 0.3)';
+                ctx.fillRect(c * SQUARE_SIZE, r * SQUARE_SIZE, SQUARE_SIZE, SQUARE_SIZE);
+            }
+
+            // 2. Draw Legal Moves (Dots)
+            legalMoves.forEach(move => {
+                const { r: tr, c: tc } = move.to;
+                const x = tc * SQUARE_SIZE + SQUARE_SIZE / 2;
+                const y = tr * SQUARE_SIZE + SQUARE_SIZE / 2;
+
+                // Draw move dot
+                ctx.fillStyle = COLOR_MOVE_DOT;
+                ctx.beginPath();
+                ctx.arc(x, y, SQUARE_SIZE * 0.15, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Draw capture indicator (if captures exist in the chain)
+                if (move.captures && move.captures.length > 0) {
+                    ctx.strokeStyle = '#ff0000';
+                    ctx.lineWidth = 4;
+                    ctx.beginPath();
+                    ctx.arc(x, y, SQUARE_SIZE * 0.25, 0, Math.PI * 2);
+                    ctx.stroke();
+                }
+            });
+
+            // 3. Draw Last Move (if applicable)
+            if (lastMove) {
+                const { fromR, fromC, toR, toC } = lastMove;
+                ctx.strokeStyle = COLOR_LAST_MOVE;
+                ctx.lineWidth = 5;
+                ctx.beginPath();
+                ctx.moveTo(fromC * SQUARE_SIZE + SQUARE_SIZE / 2, fromR * SQUARE_SIZE + SQUARE_SIZE / 2);
+                ctx.lineTo(toC * SQUARE_SIZE + SQUARE_SIZE / 2, toR * SQUARE_SIZE + SQUARE_SIZE / 2);
+                ctx.stroke();
+            }
+        }
+
+        function render() {
+            drawBoard();
+            
+            // Draw all pieces
+            for (let r = 0; r < BOARD_SIZE; r++) {
+                for (let c = 0; c < BOARD_SIZE; c++) {
+                    const piece = board[r][c];
+                    if (piece !== EMPTY) {
+                        drawPiece(r, c, piece);
+                    }
+                }
+            }
+
+            // Draw highlights
+            drawHighlights();
+        }
+
+        // =====================================================================
+        // GAME LOGIC (MOVES & CAPTURES)
+        // =====================================================================
+
+        function getPieceColor(piece) {
+            if (piece === RED || piece === RED_KING) return RED;
+            if (piece === BLACK || piece === BLACK_KING) return BLACK;
+            return null;
+        }
+
+        function isKing(piece) {
+            return piece === RED_KING || piece === BLACK_KING;
+        }
+
+        // Helper: Check if a coordinate is on the board
+        function isOnBoard(r, c) {
+            return r >= 0 && r < BOARD_SIZE && c >= 0 && c < BOARD_SIZE;
+        }
+
+        /**
+         * Recursively finds all possible jump chains starting from (r, c).
+         * @param {number} r - start row
+         * @param {number} c - start column
+         * @param {number} piece - piece type
+         * @param {Array<{r: number, c: number}>} currentChain - current sequence of jumps
+         * @param {Array<{r: number, c: number}>} captured - pieces captured so far
+         * @param {Set<string>} visited - prevents infinite loops
+         * @returns {Array<Object>} Array of complete jump chains
+         */
+        function getCaptures(r, c, piece, currentChain = [], captured = [], visited = new Set()) {
+            const color = getPieceColor(piece);
+            const results = [];
+            const directions = [];
+
+            // Determine forward movement based on color
+            if (color === RED) { // Red moves UP (row decreases)
+                directions.push({ dr: -1, dc: -1 }, { dr: -1, dc: 1 });
+            } else { // Black moves DOWN (row increases)
+                directions.push({ dr: 1, dc: -1 }, { dr: 1, dc: 1 });
+            }
+
+            // Kings move in all 4 diagonal directions
+            if (isKing(piece)) {
+                directions.push({ dr: -1, dc: -1 }, { dr: -1, dc: 1 }, { dr: 1, dc: -1 }, { dr: 1, dc: 1 });
+            }
+
+            for (const { dr, dc } of directions) {
+                // Check jump distance (2 squares)
+                const jumpR = r + dr * 2;
+                const jumpC = c + dc * 2;
+                const capturedR = r + dr;
+                const capturedC = c + dc;
+
+                // 1. Check if landing spot is valid and empty
+                if (!isOnBoard(jumpR, jumpC) || board[jumpR][jumpC] !== EMPTY) continue;
+
+                // 2. Check if captured piece exists and is an enemy
+                const capturedPiece = board[capturedR][capturedC];
+                const isEnemy = getPieceColor(capturedPiece) !== color;
+                if (!isEnemy) continue;
+
+                // 3. Check for cycles (prevent infinite loops in chain)
+                const nextStateKey = `${jumpR},${jumpC}`;
+                if (visited.has(nextStateKey)) continue;
+
+                // --- Valid Jump Found ---
+                const newChain = [...currentChain, { r, c, dr, dc }];
+                const newCaptured = [...captured, { r: capturedR, c: capturedC }];
+                const newVisited = new Set(visited);
+                newVisited.add(nextStateKey);
+
+                // Update board state temporarily for recursive call
+                const originalCapturedPiece = board[capturedR][capturedC];
+                board[capturedR][capturedC] = EMPTY;
+                board[jumpR][jumpC] = piece;
+
+                // Check for promotion upon landing
+                let nextPiece = piece;
+                if (color === RED && jumpR === 0) nextPiece = RED_KING;
+                if (color === BLACK && jumpR === 7) nextPiece = BLACK_KING;
+
+                // Recursive call
+                const subsequentChains = getCaptures(jumpR, jumpC, nextPiece, newChain, newCaptured, newVisited);
+
+                // If there are subsequent chains, add them all
+                if (subsequentChains.length > 0) {
+                    subsequentChains.forEach(chain => {
+                        // The final move is the landing spot of the last jump
+                        const lastJump = chain.lastJump;
+                        results.push({
+                            from: { r, c },
+                            to: { r: lastJump.toR, c: lastJump.toC },
+                            captures: chain.captured
+                        });
+                    });
+                } else {
+                    // This is the end of a jump chain
+                    results.push({
+                        from: { r, c },
+                        to: { r: jumpR, c: jumpC },
+                        captures: newCaptured
+                    });
+                }
+
+                // Restore board state
+                board[capturedR][capturedC] = originalCapturedPiece;
+                board[jumpR][jumpC] = board[r][c];
+            }
+            return results;
+        }
+
+        /**
+         * Finds all legal moves for a given color.
+         * Prioritizes forced captures.
+         * @param {number} color - RED or BLACK
+         * @returns {Array<Object>} Array of legal moves
+         */
+        function getAllMoves(color) {
+            const moves = [];
+            let forcedCaptures = [];
+
+            // 1. Find all possible captures
+            for (let r = 0; r < BOARD_SIZE; r++) {
+                for (let c = 0; c < BOARD_SIZE; c++) {
+                    const piece = board[r][c];
+                    if (piece !== EMPTY && getPieceColor(piece) === color) {
+                        // Temporarily set piece to its king version if applicable for capture logic
+                        const tempPiece = isKing(piece) ? piece : (color === RED ? RED_KING : BLACK_KING);
+                        
+                        // Get all jump chains starting from this piece
+                        const chains = getCaptures(r, c, tempPiece);
+                        
+                        chains.forEach(chain => {
+                            // Ensure the move is valid (i.e., the piece hasn't been captured in a previous chain)
+                            if (board[r][c] === piece) {
+                                forcedCaptures.push(chain);
+                            }
+                        });
+                    }
+                }
+            }
+
+            // 2. If captures exist, only return captures
+            if (forcedCaptures.length > 0) {
+                return forcedCaptures;
+            }
+
+            // 3. If no captures, find all standard moves
+            for (let r = 0; r < BOARD_SIZE; r++) {
+                for (let c = 0; c < BOARD_SIZE; c++) {
+                    const piece = board[r][c];
+                    if (piece !== EMPTY && getPieceColor(piece) === color) {
+                        const colorCode = getPieceColor(piece);
+                        const directions = [];
+
+                        // Determine movement directions
+                        if (colorCode === RED) { // Red moves UP (row decreases)
+                            directions.push({ dr: -1, dc: -1 }, { dr: -1, dc: 1 });
+                        } else { // Black moves DOWN (row increases)
+                            directions.push({ dr: 1, dc: -1 }, { dr: 1, dc: 1 });
+                        }
+
+                        // Kings move in all 4 diagonal directions
+                        if (isKing(piece)) {
+                            directions.push({ dr: -1, dc: -1 }, { dr: -1, dc: 1 }, { dr: 1, dc: -1 }, { dr: 1, dc: 1 });
+                        }
+
+                        for (const { dr, dc } of directions) {
+                            const nextR = r + dr;
+                            const nextC = c + dc;
+
+                            if (isOnBoard(nextR, nextC) && board[nextR][nextC] === EMPTY) {
+                                // Standard move found
+                                moves.push({
+                                    from: { r, c },
+                                    to: { r: nextR, c: nextC },
+                                    captures: []
+                                });
+                            }
+                        }
+                    }
+                }
+            }
+
+            return moves;
+        }
+
+        // =====================================================================
+        // GAME FLOW & INTERACTION
+        // =====================================================================
+
+        function updateHUD() {
+            document.getElementById('turn-display').textContent = currentPlayer === RED ? "Red" : "Black";
+            document.getElementById('red-count').textContent = countPieces(RED, RED_KING);
+            document.getElementById('black-count').textContent = countPieces(BLACK, BLACK_KING);
+            document.getElementById('move-count').textContent = moveCount;
+        }
+
+        function countPieces(p1, p2) {
+            let count = 0;
+            for (let r = 0; r < BOARD_SIZE; r++) {
+                for (let c = 0; c < BOARD_SIZE; c++) {
+                    const piece = board[r][c];
+                    if (piece === p1 || piece === p2) {
+                        count++;
+                    }
+                }
+            }
+            return count;
+        }
+
+        function handleCanvasClick(event) {
+            if (isGameOver || currentPlayer === BLACK) return; // Only handle player (Red) moves
+            
+            const rect = canvas.getBoundingClientRect();
+            const scaleX = canvas.width / rect.width;
+            const scaleY = canvas.height / rect.height;
+
+            const clickX = (event.clientX - rect.left) * scaleX;
+            const clickY = (event.clientY - rect.top) * scaleY;
+
+            const c = Math.floor(clickX / SQUARE_SIZE);
+            const r = Math.floor(clickY / SQUARE_SIZE);
+
+            if (r < 0 || r >= BOARD_SIZE || c < 0 || c >= BOARD_SIZE) return;
+
+            if (selectedPiece) {
+                const { r: sr, c: sc } = selectedPiece;
+                const potentialMove = legalMoves.find(m => m.to.r === r && m.to.c === c);
+
+                if (potentialMove) {
+                    executeMove(potentialMove);
+                } else if (board[r][c] === RED) {
+                    // Clicked another red piece, change selection
+                    selectPiece(r, c);
+                } else {
+                    // Clicked empty space or enemy, deselect
+                    selectedPiece = null;
+                    legalMoves = [];
+                    render();
+                }
+            } else {
+                // No piece selected, try to select a red piece
+                if (board[r][c] === RED || board[r][c] === RED_KING) {
+                    selectPiece(r, c);
+                }
+            }
+        }
+
+        function selectPiece(r, c) {
+            selectedPiece = { r, c };
+            legalMoves = getAllMoves(RED);
+            render();
+        }
+
+        function executeMove(move) {
+            const { from, to, captures } = move;
+
+            // 1. Update Board State
+            const piece = board[from.r][from.c];
+            
+            // Handle promotion check (Red moves up, row 0)
+            let finalPiece = piece;
+            if (piece === RED && to.r === 0) {
+                finalPiece = RED_KING;
+            }
+
+            // Move piece
+            board[to.r][to.c] = finalPiece;
+            board[from.r][from.c] = EMPTY;
+
+            // Handle captures
+            captures.forEach(captured => {
+                board[captured.r][captured.c] = EMPTY;
+            });
+
+            // 2. Update History and State
+            moveCount++;
+            moveHistory.push({
+                move: `${currentPlayer === RED ? 'Red' : 'Black'} moves from (${from.r},${from.c}) to (${to.r},${to.c})`,
+                captures: captures.length > 0 ? `(Captured ${captures.length} pieces)` : ''
+            });
+            
+            // 3. Check for multi-jumps (if captures occurred)
+            if (captures.length > 0) {
+                // If captures happened, the piece might be able to chain further
+                const pieceAtNewLocation = board[to.r][to.c];
+                const nextChains = getCaptures(to.r, to.c, pieceAtNewLocation, [], [], new Set());
+                
+                if (nextChains.length > 0) {
+                    // Chain continues! Keep the turn.
+                    selectedPiece = { r: to.r, c: to.c };
+                    legalMoves = nextChains;
+                    render();
+                    return; // Do not switch turns
+                }
+            }
+
+            // 4. End Turn Logic
+            selectedPiece = null;
+            legalMoves = [];
+            
+            // Check for game end conditions
+            if (checkWinCondition(RED)) {
+                endGame("RED WINS!");
+                return;
+            }
+            if (checkWinCondition(BLACK)) {
+                endGame("BLACK WINS!");
+                return;
+            }
+
+            currentPlayer = currentPlayer === RED ? BLACK : RED;
+            updateHUD();
+            render();
+
+            // If it's Black's turn, trigger AI
+            if (currentPlayer === BLACK) {
+                setTimeout(cpuTurn, 700); // Delay for visual effect
+            }
+        }
+
+        function checkWinCondition(color) {
+            const opponentColor = color === RED ? BLACK : RED;
+            let opponentPieces = 0;
+            let opponentHasLegalMoves = false;
+
+            for (let r = 0; r < BOARD_SIZE; r++) {
+                for (let c = 0; c < BOARD_SIZE; c++) {
+                    const piece = board[r][c];
+                    if (getPieceColor(piece) === opponentColor) {
+                        opponentPieces++;
+                    }
+                }
+            }
+
+            if (opponentPieces === 0) return true;
+
+            // Check if opponent has any legal moves left
+            const opponentMoves = getAllMoves(opponentColor);
+            if (opponentMoves.length === 0) return true;
+
+            return false;
+        }
+
+        function endGame(winner) {
+            isGameOver = true;
+            winnerText.textContent = winner;
+            gameOverScreen.style.display = 'flex';
+            startButton.disabled = true;
+        }
+
+        // =====================================================================
+        // CPU AI (Greedy)
+        // =====================================================================
+
+        function cpuTurn() {
+            if (isGameOver) return;
+
+            const moves = getAllMoves(BLACK);
+            if (moves.length === 0) {
+                // CPU has no moves, Red wins
+                endGame("RED WINS!");
+                return;
+            }
+
+            // AI Score Calculation:
+            // 1. Priority: Captures (High score)
+            // 2. Secondary: Center control (Low row/col index)
+            // 3. Tertiary: Randomness (Exploration)
+
+            const scoredMoves = moves.map(move => {
+                let score = 0;
+                
+                // Capture bonus
+                score += move.captures.length * 100;
+
+                // Center preference (closer to 3.5, 3.5)
+                const fromCenter = Math.abs(move.from.r - 3.5) + Math.abs(move.from.c - 3.5);
+                const toCenter = Math.abs(move.to.r - 3.5) + Math.abs(move.to.c - 3.5);
+                score += (fromCenter + toCenter) * 0.1;
+
+                // Add slight randomness to break ties and explore
+                score += Math.random() * 0.3; 
+
+                return { move, score };
+            });
+
+            // Sort by score descending
+            scoredMoves.sort((a, b) => b.score - a.score);
+
+            // Select the best move
+            const bestMove = scoredMoves[0].move;
+
+            // Execute the move
+            executeMove(bestMove);
+        }
+
+        // =====================================================================
+        // AUDIO IMPLEMENTATION (Web Audio API)
+        // =====================================================================
+
+        function initAudio() {
+            try {
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+            } catch (e) {
+                console.warn("Web Audio API not supported.");
+                isAudioEnabled = false;
+            }
+        }
+
+        function playSound(freq, duration, type = 'sine', volume = 0.1) {
+            if (!isAudioEnabled || isMuted) return;
+
+            if (!audioContext) return;
+
+            const oscillator = audioContext.createOscillator();
+            const gainNode = audioContext.createGain();
+
+            oscillator.type = type;
+            oscillator.frequency.setValueAtTime(freq, audioContext.currentTime);
+
+            gainNode.gain.setValueAtTime(volume, audioContext.currentTime);
+            gainNode.gain.exponentialRampToValue(0.001, audioContext.currentTime + duration);
+
+            oscillator.connect(gainNode);
+            gainNode.connect(audioContext.destination);
+
+            oscillator.start();
+            oscillator.stop(audioContext.currentTime + duration);
+        }
+
+        function playMoveSound() {
+            playSound(440, 0.1, 'square', 0.15);
+        }
+
+        function playCaptureSound() {
+            playSound(150, 0.2, 'sawtooth', 0.3);
+        }
+
+        function playKingSound() {
+            playSound(880, 0.3, 'triangle', 0.2);
+        }
+
+        function playGameOverSound(win) {
+            const freq = win ? 660 : 220;
+            const duration = 1.5;
+            playSound(freq, duration, 'sine', 0.4);
+        }
+
+        function toggleMute() {
+            isMuted = !isMuted;
+            muteButton.classList.toggle('muted', isMuted);
+        }
+
+        // =====================================================================
+        // UTILITIES & EVENT LISTENERS
+        // =====================================================================
+
+        function updateHistoryDisplay() {
+            const log = document.getElementById('history-log');
+            log.innerHTML = "Move History:<br>";
+            moveHistory.forEach((entry, index) => {
+                log.innerHTML += `[${index + 1}] ${entry.move} ${entry.captures}<br>`;
+            });
+            log.scrollTop = log.scrollHeight;
+        }
+
+        function handleAnimationQueue() {
+            if (animationQueue.length === 0 || isAnimating) return;
+            
+            isAnimating = true;
+            const step = animationQueue.shift();
+
+            // Apply the move
+            const { from, to, captures } = step;
+            const piece = board[from.r][from.c];
+            
+            // Handle promotion check
+            let finalPiece = piece;
+            if (piece === RED && to.r === 0) {
+                finalPiece = RED_KING;
+            }
+
+            // Move piece
+            board[to.r][to.c] = finalPiece;
+            board[from.r][from.c] = EMPTY;
+
+            // Handle captures
+            captures.forEach(captured => {
+                board[captured.r][captured.c] = EMPTY;
+            });
+
+            // Update state
+            if (step.capturedCount > 0) {
+                playCaptureSound();
+            } else {
+                playMoveSound();
+            }
+
+            // Update UI
+            render();
+            updateHUD();
+            updateHistoryDisplay();
+
+            // Check for chain continuation
+            const pieceAtNewLocation = board[to.r][to.c];
+            const nextChains = getCaptures(to.r, to.c, pieceAtNewLocation, [], [], new Set());
+
+            if (nextChains.length > 0) {
+                // Chain continues! Add next moves to queue
+                const nextMoves = nextChains.map(chain => ({
+                    from: { r: to.r, c: to.c },
+                    to: { r: chain.to.r, c: chain.to.c },
+                    captures: chain.captures,
+                    capturedCount: chain.captures.length
+                }));
+                animationQueue.push(...nextMoves);
+                setTimeout(handleAnimationQueue, 200); // Short delay for visual chaining
+            } else {
+                // Chain ends, switch turn (if not AI)
+                if (currentPlayer === RED) {
+                    currentPlayer = BLACK;
+                    setTimeout(cpuTurn, 700);
+                } else {
+                    currentPlayer = RED;
+                    updateHUD();
+                }
+                isAnimating = false;
+            }
+        }
+
+        function executeMove(move) {
+            // Reset animation queue and push the first move
+            animationQueue = [{
+                from: move.from,
+                to: move.to,
+                captures: move.captures,
+                capturedCount: move.captures.length
+            }];
+            handleAnimationQueue();
+        }
+
+
+        // =====================================================================
+        // INITIAL SETUP CALL
+        // =====================================================================
+        
+        window.onload = () => {
+            initAudio();
+            initBoard();
+
+            // Event Listeners
+            canvas.addEventListener('click', handleCanvasClick);
+            startButton.addEventListener('click', startGame);
+            muteButton.addEventListener('click', toggleMute);
+            playAgainButton.addEventListener('click', resetGame);
+        };
+
+    </script>
+</body>
+</html>

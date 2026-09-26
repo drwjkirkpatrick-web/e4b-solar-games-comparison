@@ -1,0 +1,742 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>GRIND CITY</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: 'Arial', sans-serif;
+        }
+        canvas {
+            border: 2px solid #00ffff;
+            box-shadow: 0 0 20px #00ffff;
+            background-color: #1a1a2e;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas" width="900" height="500"></canvas>
+
+    <script>
+        // =========================================================================
+        // CORE SETUP AND CONSTANTS
+        // =========================================================================
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        const GAME_WIDTH = 900;
+        const GAME_HEIGHT = 500;
+        const GROUND_Y = 420;
+        const GRAVITY = 0.8;
+        const SCROLL_SPEED_BASE = 4;
+        const MAX_SPEED = 12;
+
+        // Game States
+        const STATE = {
+            MENU: 'menu',
+            PLAY: 'playing',
+            GAME_OVER: 'gameover'
+        };
+
+        let gameState = STATE.MENU;
+        let lastTime = 0;
+        let score = 0;
+        let distance = 0;
+        let highscore = localStorage.getItem('grindCityHS') || 0;
+        let gameSpeed = SCROLL_SPEED_BASE;
+
+        // Input handling
+        const keys = {};
+        window.addEventListener('keydown', (e) => {
+            keys[e.code] = true;
+            if (e.code === 'Space' && gameState === STATE.MENU) {
+                startGame();
+            }
+        });
+        window.addEventListener('keyup', (e) => {
+            keys[e.code] = false;
+        });
+
+        // =========================================================================
+        // AUDIO ENGINE (Web Audio API)
+        // =========================================================================
+        class SoundGenerator {
+            constructor() {
+                this.ctx = new (window.AudioContext || window.webkitAudioContext)();
+            }
+
+            play(type, duration = 0.1, frequency = 440, gain = 0.5) {
+                if (this.ctx.state === 'suspended') {
+                    this.ctx.resume();
+                }
+
+                const oscillator = this.ctx.createOscillator();
+                const gainNode = this.ctx.createGain();
+
+                oscillator.connect(gainNode);
+                gainNode.connect(this.ctx.destination);
+
+                oscillator.type = type;
+                oscillator.frequency.setValueAtTime(frequency, this.ctx.currentTime);
+                gainNode.gain.setValueAtTime(gain, this.ctx.currentTime);
+
+                if (type === 'whoosh') {
+                    // Rising pitch for jump
+                    oscillator.frequency.exponentialRampTo(frequency * 2, this.ctx.currentTime + duration);
+                    gainNode.gain.exponentialRampTo(0.001, this.ctx.currentTime + duration);
+                } else if (type === 'grind') {
+                    // Noise for grinding
+                    const buffer = this.ctx.createBuffer(1, this.ctx.sampleRate * duration, this.ctx.sampleRate);
+                    const data = buffer.getChannelData(0);
+                    for (let i = 0; i < data.length; i++) {
+                        data[i] = Math.random() * 2 - 1;
+                    }
+                    const source = this.ctx.createBufferSource();
+                    source.buffer = buffer;
+                    source.connect(gainNode);
+                    gainNode.gain.setValueAtTime(gain, this.ctx.currentTime);
+                    source.start();
+                    source.stop(this.ctx.currentTime + duration);
+                } else if (type === 'crash') {
+                    // Low frequency thud
+                    oscillator.type = 'sawtooth';
+                    oscillator.frequency.setValueAtTime(50, this.ctx.currentTime);
+                    gainNode.gain.exponentialRampTo(0.001, this.ctx.currentTime + 0.5);
+                    source.start();
+                    source.stop(this.ctx.currentTime + 0.5);
+                } else if (type === 'trick') {
+                    // High pitch chime
+                    oscillator.type = 'triangle';
+                    gainNode.gain.exponentialRampTo(0.001, this.ctx.currentTime + 0.3);
+                }
+
+                oscillator.start(this.ctx.currentTime);
+                oscillator.stop(this.ctx.currentTime + duration);
+            }
+        }
+        const audio = new SoundGenerator();
+
+        // =========================================================================
+        // GAME OBJECT CLASSES
+        // =========================================================================
+
+        class Player {
+            constructor() {
+                this.x = 50;
+                this.y = GROUND_Y - 50;
+                this.width = 20;
+                this.height = 50;
+                this.velocityY = 0;
+                this.isGrounded = true;
+                this.isCrouching = false;
+                this.isGrinding = false;
+                this.isAirborne = false;
+                this.trickCooldown = 0;
+                this.trickName = "";
+                this.comboMultiplier = 1;
+                this.comboCounter = 0;
+                this.speed = 0;
+                this.leanAngle = 0;
+            }
+
+            update(dt) {
+                // Physics
+                if (!this.isGrounded) {
+                    this.velocityY += GRAVITY;
+                    this.y += this.velocityY;
+                    this.isAirborne = true;
+                }
+
+                // Horizontal Movement
+                let targetSpeed = gameSpeed;
+                if (keys['ArrowLeft'] || keys['KeyA']) targetSpeed = -gameSpeed;
+                if (keys['ArrowRight'] || keys['KeyD']) targetSpeed = gameSpeed;
+                
+                this.speed = targetSpeed;
+                this.x += this.speed;
+
+                // Crouching
+                if (keys['Space'] && !this.isGrounded) {
+                    this.isCrouching = true;
+                    this.height = 25;
+                    this.y += 25;
+                } else if (keys['Space'] && this.isGrounded) {
+                    this.isCrouching = false;
+                    this.height = 50;
+                } else {
+                    this.isCrouching = false;
+                    this.height = 50;
+                }
+
+                // Trick Cooldown
+                if (this.trickCooldown > 0) this.trickCooldown -= dt;
+
+                // Trick Input
+                if (this.isAirborne && this.trickCooldown === 0) {
+                    if (keys['KeyJ']) {
+                        this.performTrick('Kickflip', 100);
+                    } else if (keys['KeyK']) {
+                        this.performTrick('Grab', 150);
+                    } else if (keys['KeyL']) {
+                        this.performTrick('360 Spin', 200);
+                    }
+                }
+
+                // Grind Logic
+                if (this.isGrinding) {
+                    this.speed = gameSpeed; // Maintain speed while grinding
+                    this.x += this.speed * 0.5; // Slightly slower movement
+                    // Grind doesn't affect vertical physics
+                }
+
+                // Check Ground Collision (Simplified)
+                if (this.y + this.height >= GROUND_Y) {
+                    this.y = GROUND_Y - this.height;
+                    this.velocityY = 0;
+                    this.isGrounded = true;
+                    this.isAirborne = false;
+                    this.leanAngle = 0;
+                    this.isGrinding = false;
+                }
+            }
+
+            performTrick(name, pts) {
+                if (this.isAirborne && this.trickCooldown === 0) {
+                    this.trickName = name;
+                    this.trickCooldown = 1.5; // 1.5 second cooldown
+                    this.comboCounter++;
+                    
+                    // Calculate combo multiplier
+                    this.comboMultiplier = 1 + Math.floor(this.comboCounter / 2);
+                    
+                    score += pts * this.comboMultiplier;
+                    audio.play('trick');
+                }
+            }
+
+            draw() {
+                ctx.save();
+                ctx.translate(this.x + this.width / 2, this.y + this.height / 2);
+                
+                // Apply lean angle for dynamic movement
+                const lean = this.speed * 0.05;
+                ctx.rotate(lean);
+
+                // --- Body (Orange) ---
+                ctx.fillStyle = '#ff8c00'; // Orange
+                ctx.fillRect(-this.width/2, -this.height/2, this.width, this.height);
+
+                // --- Skateboard (Cyan/Blue) ---
+                ctx.fillStyle = '#00ffff'; // Cyan
+                ctx.fillRect(-this.width/2 - 5, this.height/2 + 5, this.width + 10, 5);
+
+                // --- Helmet (Cyan) ---
+                ctx.fillStyle = '#00ffff';
+                ctx.beginPath();
+                ctx.arc(0, -this.height/2 - 5, 8, 0, Math.PI * 2);
+                ctx.fill();
+
+                // --- Wheels (White) ---
+                ctx.fillStyle = 'white';
+                ctx.fillRect(-this.width/2 - 2, this.height/2 + 5, 4, 4);
+                ctx.fillRect(this.width/2 - 2, this.height/2 + 5, 4, 4);
+
+                // Draw trick text if active
+                if (this.trickName) {
+                    ctx.fillStyle = 'white';
+                    ctx.font = 'bold 16px Arial';
+                    ctx.textAlign = 'center';
+                    ctx.fillText(this.trickName, 0, -this.height/2 - 20);
+                }
+
+                ctx.restore();
+            }
+        }
+
+        class Platform {
+            constructor(x, y, w, h, isRamp = false, rampAngle = 0) {
+                this.x = x;
+                this.y = y;
+                this.width = w;
+                this.height = h;
+                this.isRamp = isRamp;
+                this.angle = rampAngle; // Angle in radians
+            }
+
+            draw() {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.angle);
+
+                // Base color
+                ctx.fillStyle = '#333';
+                ctx.fillRect(0, 0, this.width, this.height);
+
+                // Ramp stripe if applicable
+                if (this.isRamp) {
+                    ctx.fillStyle = '#aaa';
+                    ctx.fillRect(0, 0, this.width, 10);
+                }
+
+                ctx.restore();
+            }
+        }
+
+        class Rail {
+            constructor(x, y, w, h, angle) {
+                this.x = x;
+                this.y = y;
+                this.width = w;
+                this.height = h;
+                this.angle = angle;
+                this.isGrinding = false;
+            }
+
+            draw() {
+                ctx.save();
+                ctx.translate(this.x, this.y);
+                ctx.rotate(this.angle);
+
+                // Rail line (Yellow metallic)
+                ctx.strokeStyle = '#ffcc00';
+                ctx.lineWidth = 8;
+                ctx.beginPath();
+                ctx.moveTo(0, 0);
+                ctx.lineTo(this.width, 0);
+                ctx.stroke();
+
+                // Spark particles (simple dots)
+                if (this.isGrinding) {
+                    ctx.fillStyle = '#ffcc00';
+                    for (let i = 0; i < 5; i++) {
+                        ctx.fillRect(Math.random() * this.width, Math.random() * 10, 3, 3);
+                    }
+                }
+
+                ctx.restore();
+            }
+        }
+
+        class Obstacle {
+            constructor(x, y, type) {
+                this.x = x;
+                this.y = y;
+                this.type = type; // 'trash' or 'bench'
+                this.width = 20;
+                this.height = 30;
+                this.knockOver = false;
+            }
+
+            draw() {
+                if (this.type === 'trash') {
+                    ctx.fillStyle = this.knockOver ? '#aaa' : '#555';
+                    ctx.fillRect(this.x, this.y, this.width, this.height);
+                    // Lid
+                    ctx.fillStyle = '#222';
+                    ctx.fillRect(this.x - 2, this.y - 5, this.width + 4, 5);
+                } else if (this.type === 'bench') {
+                    ctx.fillStyle = '#444';
+                    ctx.fillRect(this.x, this.y, this.width, 10); // Seat
+                    ctx.fillRect(this.x - 5, this.y + 10, 5, this.height - 10); // Leg 1
+                    ctx.fillRect(this.x + this.width, this.y + 10, 5, this.height - 10); // Leg 2
+                }
+            }
+        }
+
+        // =========================================================================
+        // GAME LOGIC & PROCEDURAL GENERATION
+        // =========================================================================
+
+        let player = new Player();
+        let platforms = [];
+        let rails = [];
+        let obstacles = [];
+        let levelSegments = [];
+        let trickPopup = { text: "", y: 0, alpha: 0, speed: 0.5 };
+
+        // Function to generate a random level segment
+        function generateSegment(startX) {
+            const segment = {
+                platforms: [],
+                rails: [],
+                obstacles: []
+            };
+
+            // 1. Ground Platform (always exists)
+            segment.platforms.push(new Platform(startX, GROUND_Y, 150, 20));
+
+            // 2. Random Feature Generation
+            const features = ['platform', 'ramp', 'rail', 'gap', 'obstacle'];
+            const numFeatures = Math.floor(Math.random() * 3) + 1;
+
+            for (let i = 0; i < numFeatures; i++) {
+                const type = features[Math.floor(Math.random() * features.length)];
+                let xOffset = Math.random() * 100;
+                let yOffset = Math.random() * 150;
+                let y = GROUND_Y - yOffset;
+                let w = 100 + Math.random() * 100;
+                let h = 20 + Math.random() * 40;
+
+                if (type === 'platform') {
+                    segment.platforms.push(new Platform(startX + xOffset, y, w, h));
+                } else if (type === 'ramp') {
+                    const angle = Math.random() * 0.5 - 0.25; // Slight upward slope
+                    segment.platforms.push(new Platform(startX + xOffset, y, w, h, true, angle));
+                } else if (type === 'rail') {
+                    const angle = Math.random() * 0.5 - 0.25;
+                    segment.rails.push(new Rail(startX + xOffset, y, w, h, angle));
+                } else if (type === 'gap') {
+                    // Gap is just a missing platform, handled by not placing one
+                } else if (type === 'obstacle') {
+                    const obsType = Math.random() > 0.5 ? 'trash' : 'bench';
+                    segment.obstacles.push(new Obstacle(startX + xOffset, y - 30, obsType));
+                }
+            }
+            return segment;
+        }
+
+        function initializeLevel() {
+            // Start with a few segments
+            for (let i = 0; i < 5; i++) {
+                levelSegments.push(generateSegment(i * 200));
+            }
+        }
+
+        function updateLevel(dt) {
+            const scrollAmount = gameSpeed * dt;
+            
+            // Move all segments
+            levelSegments.forEach(segment => {
+                segment.platforms.forEach(p => p.x -= scrollAmount);
+                segment.rails.forEach(r => r.x -= scrollAmount);
+                segment.obstacles.forEach(o => o.x -= scrollAmount);
+            });
+
+            // Recycle segments
+            levelSegments = levelSegments.filter(segment => {
+                // If the segment is far off screen, recycle it
+                if (segment.platforms[0].x < -200) {
+                    const newSegment = generateSegment(levelSegments[levelSegments.length - 1].platforms[0].x - 200);
+                    levelSegments.push(newSegment);
+                    return false;
+                }
+                return true;
+            });
+        }
+
+        function checkCollisions() {
+            // 1. Platform Collisions
+            let onPlatform = false;
+            for (const segment of levelSegments) {
+                for (const platform of segment.platforms) {
+                    if (player.x < platform.x + platform.width &&
+                        player.x + player.width > platform.x &&
+                        player.y + player.height > platform.y &&
+                        player.y < platform.y + platform.height) {
+                        
+                        // Simple landing check (bottom collision)
+                        if (player.velocityY > 0 && player.y + player.height - player.velocityY <= platform.y + platform.height) {
+                            player.y = platform.y - player.height;
+                            player.velocityY = 0;
+                            player.isGrounded = true;
+                            player.isAirborne = false;
+                            onPlatform = true;
+                            break;
+                        }
+                    }
+                }
+                if (onPlatform) break;
+            }
+
+            // 2. Rail Collisions (Grinding)
+            let onRail = false;
+            for (const segment of levelSegments) {
+                for (const rail of segment.rails) {
+                    // Simplified check: is the player near the rail's X range and on the same Y level?
+                    if (player.x + player.width > rail.x && player.x < rail.x + rail.width &&
+                        player.y + player.height > rail.y && player.y < rail.y + rail.height) {
+                        
+                        // Check if player is moving towards the rail
+                        if (player.speed > 0) {
+                            player.isGrinding = true;
+                            rail.isGrinding = true;
+                            audio.play('grind');
+                            score += 50; // Grind tick score
+                            onRail = true;
+                        }
+                    }
+                }
+            }
+
+            // 3. Obstacle Collisions
+            for (const segment of levelSegments) {
+                for (const obstacle of segment.obstacles) {
+                    if (player.x < obstacle.x + obstacle.width &&
+                        player.x + player.width > obstacle.x &&
+                        player.y < obstacle.y + obstacle.height &&
+                        player.y + player.height > obstacle.y) {
+                        
+                        if (obstacle.type === 'trash') {
+                            if (!obstacle.knockOver) {
+                                obstacle.knockOver = true;
+                                score += 50;
+                                gameSpeed *= 0.8; // Slow down
+                                audio.play('whoosh', 0.5, 100, 0.8);
+                            }
+                        }
+                        // Benches just slow you down slightly if hit
+                        if (obstacle.type === 'bench') {
+                            gameSpeed *= 0.9;
+                        }
+                    }
+                }
+            }
+
+            // 4. Game Over Conditions
+            if (player.y > GROUND_Y + 50) {
+                // Fell into the abyss
+                gameOver();
+            }
+            
+            // Reset grinding state if player leaves rail area
+            if (!onRail && player.isGrinding) {
+                player.isGrinding = false;
+                // Stop grind sound (handled implicitly by the loop)
+            }
+        }
+
+        // =========================================================================
+        // DRAWING FUNCTIONS
+        // =========================================================================
+
+        function drawParallax(dt) {
+            const scroll = gameSpeed * dt;
+            
+            // Far Layer (0.2x)
+            ctx.fillStyle = '#2a2a4a';
+            ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+            
+            // Mid Layer (0.5x) - Simple building lines
+            ctx.strokeStyle = '#3a3a6a';
+            ctx.lineWidth = 2;
+            for (let i = 0; i < 10; i++) {
+                const x = (i * 300 * 0.5) - (scroll * 0.5 % (GAME_WIDTH + 300 * 0.5));
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x + 50, GAME_HEIGHT);
+                ctx.stroke();
+            }
+
+            // Near Layer (1.0x) - Ground details
+            ctx.fillStyle = '#16213e';
+            ctx.fillRect(0, GROUND_Y, GAME_WIDTH, GAME_HEIGHT - GROUND_Y);
+
+            // City Lights (Neon accents)
+            ctx.fillStyle = '#00ffff';
+            for (let i = 0; i < 15; i++) {
+                const x = (i * 200) - (scroll % (GAME_WIDTH + 200));
+                const y = GROUND_Y - (Math.random() * 100);
+                ctx.fillRect(x, y, 3, 5);
+            }
+        }
+
+        function drawGround() {
+            // Sidewalk/Cracks
+            ctx.fillStyle = '#16213e';
+            ctx.fillRect(0, GROUND_Y, GAME_WIDTH, GAME_HEIGHT - GROUND_Y);
+
+            // Cracks
+            ctx.strokeStyle = '#000';
+            ctx.lineWidth = 1;
+            for (let i = 0; i < GAME_WIDTH; i += 40) {
+                ctx.beginPath();
+                ctx.moveTo(i, GROUND_Y);
+                ctx.lineTo(i + 10, GROUND_Y + 10);
+                ctx.stroke();
+            }
+
+            // Moon and Stars
+            ctx.fillStyle = 'white';
+            ctx.font = '18px Arial';
+            ctx.fillText('🌙', 50, 50);
+            ctx.fillText('✨', 300, 100);
+            ctx.fillText('✨', 700, 50);
+        }
+
+        function drawHUD() {
+            ctx.fillStyle = 'white';
+            ctx.font = '24px Arial';
+            ctx.textAlign = 'left';
+            ctx.fillText(`SCORE: ${score}`, 20, 30);
+
+            ctx.textAlign = 'center';
+            ctx.fillText(`DISTANCE: ${Math.floor(distance)}m`, GAME_WIDTH / 2, 30);
+
+            // Combo Meter
+            ctx.textAlign = 'right';
+            ctx.fillStyle = `rgba(0, 255, 255, ${player.comboMultiplier})`;
+            ctx.font = 'bold 24px Arial';
+            ctx.fillText(`COMBO x${player.comboMultiplier}`, GAME_WIDTH - 20, 30);
+        }
+
+        function drawUI() {
+            if (gameState === STATE.MENU) {
+                ctx.fillStyle = '#00ffff';
+                ctx.font = 'bold 72px Arial';
+                ctx.textAlign = 'center';
+                ctx.shadowColor = '#00ffff';
+                ctx.shadowBlur = 15;
+                ctx.fillText('GRIND CITY', GAME_WIDTH / 2, 150);
+                
+                ctx.font = '24px Arial';
+                ctx.fillStyle = 'white';
+                ctx.fillText('PRESS SPACE TO SHRED', GAME_WIDTH / 2, 220);
+                
+                ctx.font = '18px Arial';
+                ctx.fillStyle = '#aaa';
+                ctx.fillText(`HIGH SCORE: ${highscore}`, GAME_WIDTH / 2, 260);
+                ctx.shadowBlur = 0;
+            } 
+            
+            if (gameState === STATE.GAME_OVER) {
+                ctx.fillStyle = '#ff4444';
+                ctx.font = 'bold 80px Arial';
+                ctx.textAlign = 'center';
+                ctx.fillText('WIPEOUT!', GAME_WIDTH / 2, 200);
+
+                ctx.fillStyle = 'white';
+                ctx.font = '30px Arial';
+                ctx.fillText(`Final Score: ${score}`, GAME_WIDTH / 2, 300);
+                ctx.fillText(`High Score: ${highscore}`, GAME_WIDTH / 2, 350);
+                
+                ctx.font = '20px Arial';
+                ctx.fillStyle = '#00ffff';
+                ctx.fillText('Press SPACE to Restart', GAME_WIDTH / 2, 420);
+            }
+        }
+
+        function drawTrickPopup() {
+            if (trickPopup.alpha > 0) {
+                ctx.save();
+                ctx.font = 'bold 30px Arial';
+                ctx.fillStyle = 'white';
+                ctx.shadowColor = '#00ffff';
+                ctx.shadowBlur = 10;
+                ctx.textAlign = 'center';
+                
+                // Position based on player's head area
+                const popupX = player.x + player.width / 2;
+                const popupY = player.y - player.height - 30;
+
+                ctx.fillText(trickPopup.text, popupX, popupY);
+                ctx.restore();
+            }
+        }
+
+        // =========================================================================
+        // GAME LOOP & STATE MANAGEMENT
+        // =========================================================================
+
+        function update(dt) {
+            if (gameState !== STATE.PLAY) return;
+
+            // Update Score and Distance
+            score += Math.floor(gameSpeed * 0.1);
+            distance += gameSpeed * dt;
+
+            // Update Player
+            player.update(dt);
+            
+            // Update Level
+            updateLevel(dt);
+            
+            // Check Interactions
+            checkCollisions();
+
+            // Update Trick Popup
+            if (trickPopup.alpha > 0) {
+                trickPopup.y -= trickPopup.speed;
+                trickPopup.alpha -= 0.02;
+                if (trickPopup.alpha <= 0) {
+                    trickPopup.text = "";
+                    trickPopup.alpha = 0;
+                }
+            }
+        }
+
+        function draw() {
+            // Clear canvas
+            ctx.clearRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+            // Draw Parallax and Ground
+            drawParallax(0);
+            drawGround();
+
+            // Draw Level Elements
+            for (const segment of levelSegments) {
+                segment.platforms.forEach(p => p.draw());
+                segment.rails.forEach(r => r.draw());
+                segment.obstacles.forEach(o => o.draw());
+            }
+
+            // Draw Player
+            player.draw();
+
+            // Draw UI/HUD
+            drawHUD();
+            drawTrickPopup();
+            drawUI();
+        }
+
+        function gameLoop(timestamp) {
+            const dt = (timestamp - lastTime) / 16.666; // Normalize delta time (approx 60fps)
+            lastTime = timestamp;
+
+            if (gameState === STATE.PLAY) {
+                update(dt);
+            }
+            
+            draw();
+            requestAnimationFrame(gameLoop);
+        }
+
+        function startGame() {
+            // Reset state
+            score = 0;
+            distance = 0;
+            gameSpeed = SCROLL_SPEED_BASE;
+            player = new Player();
+            platforms = [];
+            rails = [];
+            obstacles = [];
+            levelSegments = [];
+            
+            // Initialize level
+            initializeLevel();
+            
+            gameState = STATE.PLAY;
+            lastTime = performance.now();
+        }
+
+        function gameOver() {
+            gameState = STATE.GAME_OVER;
+            
+            if (score > highscore) {
+                highscore = score;
+                localStorage.setItem('grindCityHS', highscore);
+            }
+        }
+
+        // Start the loop
+        requestAnimationFrame(gameLoop);
+    </script>
+</body>
+</html>

@@ -1,0 +1,962 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>MISS PAC-MAZE</title>
+    <style>
+        body {
+            margin: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+            background-color: #000;
+            color: #fff;
+            font-family: 'Courier New', monospace;
+            overflow: hidden;
+            touch-action: none; /* Prevent scrolling on mobile */
+        }
+        canvas {
+            border: 4px solid #333;
+            image-rendering: pixelated;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.8);
+            background-color: #000;
+        }
+        #ui-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            padding: 10px;
+            box-sizing: border-box;
+            pointer-events: none;
+            display: flex;
+            justify-content: space-between;
+            font-size: 18px;
+            text-shadow: 2px 2px 4px #000;
+        }
+        #start-screen, #game-over-screen {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: rgba(0, 0, 0, 0.9);
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            text-align: center;
+            z-index: 100;
+        }
+        .hidden {
+            display: none !important;
+        }
+        h1 {
+            font-size: 48px;
+            color: #ff00ff;
+            text-shadow: 0 0 10px #ff00ff;
+        }
+        button {
+            padding: 15px 30px;
+            font-size: 24px;
+            cursor: pointer;
+            background: #ff00ff;
+            color: #000;
+            border: none;
+            border-radius: 5px;
+            margin-top: 20px;
+            transition: background 0.2s;
+        }
+        button:hover {
+            background: #ff33ff;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui-overlay">
+        <div id="score-display">SCORE: 0</div>
+        <div id="lives-display">LIVES: ❤️ ❤️ ❤️</div>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <!-- Start Screen -->
+    <div id="start-screen">
+        <h1>MISS PAC-MAZE</h1>
+        <p>PRESS SPACE TO START</p>
+        <p>Controls: WASD / Arrows | M to Mute | P to Pause</p>
+        <p>High Score: <span id="high-score-display">0</span></p>
+    </div>
+
+    <!-- Game Over Screen -->
+    <div id="game-over-screen" class="hidden">
+        <h1>GAME OVER</h1>
+        <p>Final Score: <span id="final-score">0</span></p>
+        <p>High Score: <span id="final-high-score">0</span></p>
+        <button onclick="startGame()">RESTART</button>
+    </div>
+
+    <script>
+        // =====================================================================
+        // GAME CONSTANTS AND SETUP
+        // =====================================================================
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        
+        // Game Configuration
+        const TILE_SIZE = 20;
+        const GRID_COLS = 21;
+        const GRID_ROWS = 21;
+        canvas.width = GRID_COLS * TILE_SIZE;
+        canvas.height = GRID_ROWS * TILE_SIZE;
+
+        // Game State
+        let gameState = 'START'; // START, PLAY, PAUSE, GAMEOVER
+        let score = 0;
+        let lives = 3;
+        let level = 1;
+        let highscore = 0;
+        let isMuted = false;
+        let isPaused = false;
+        let lastUpdateTime = 0;
+        let gameSpeed = 100; // Base movement speed (ms per tile)
+        let ghostSpeedMultiplier = 1.0;
+
+        // Maze Definition (0 = Wall, 1 = Path)
+        // This is a simplified, fixed maze structure.
+        const MAZE = [
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,1,1,1,1,1,0,1,1,1,1,1,0,1,1,1,1,1,1,1,0],
+            [0,1,0,0,0,1,0,1,0,0,0,1,0,1,0,0,0,0,0,1,0],
+            [0,1,0,1,1,1,1,1,0,1,1,1,1,1,0,1,1,1,0,1,0],
+            [0,1,0,1,0,0,0,0,0,0,0,0,0,1,0,0,0,0,0,1,0],
+            [0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0],
+            [0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0],
+            [0,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0,1,1,0],
+            [0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,1,1,1,1,1,1,0,1,1,1,1,1,1,1,1,1,0,1,1,0],
+            [0,1,0,0,0,0,0,0,1,0,0,0,0,0,0,0,0,0,1,0,0],
+            [0,1,0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0],
+            [0,1,0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0,0],
+            [0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0],
+            [0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0],
+            [0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0],
+            [0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0],
+            [0,1,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1,0],
+            [0,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,1,0],
+            [0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,0]
+        ];
+
+        // =====================================================================
+        // GAME OBJECT CLASSES
+        // =====================================================================
+
+        class Entity {
+            constructor(x, y, radius, color) {
+                this.gridX = x;
+                this.gridY = y;
+                this.x = x * TILE_SIZE + TILE_SIZE / 2;
+                this.y = y * TILE_SIZE + TILE_SIZE / 2;
+                this.radius = radius;
+                this.color = color;
+                this.speed = 1; // Tiles per update cycle
+            }
+
+            // Converts grid coordinates to world coordinates
+            getPos() {
+                return {
+                    x: this.gridX * TILE_SIZE + TILE_SIZE / 2,
+                    y: this.gridY * TILE_SIZE + TILE_SIZE / 2
+                };
+            }
+
+            // Simple check if entity is within bounds
+            isValidPosition(newX, newY) {
+                return newX >= 0 && newX < GRID_COLS && newY >= 0 && newY < GRID_ROWS && MAZE[newY][newX] === 1;
+            }
+        }
+
+        class MissPac extends Entity {
+            constructor(x, y) {
+                super(x, y, TILE_SIZE * 0.4, '#FFD700'); // Yellow
+                this.mouthOpen = 0; // 0 to 1
+                this.direction = { dx: 0, dy: 0 }; // Current movement vector
+            }
+
+            update(targetGridX, targetGridY, speed) {
+                const currentGridX = this.gridX;
+                const currentGridY = this.gridY;
+
+                // Determine movement direction based on input
+                let newX = currentGridX;
+                let newY = currentGridY;
+
+                if (this.direction.dx !== 0) {
+                    newX += this.direction.dx;
+                } else if (this.direction.dy !== 0) {
+                    newY += this.direction.dy;
+                }
+
+                // Attempt to move
+                if (this.isValidPosition(newX, newY)) {
+                    this.gridX = newX;
+                    this.gridY = newY;
+                    this.x = newX * TILE_SIZE + TILE_SIZE / 2;
+                    this.y = newY * TILE_SIZE + TILE_SIZE / 2;
+                }
+
+                // Mouth animation based on movement
+                if (this.direction.dx !== 0 || this.direction.dy !== 0) {
+                    this.mouthOpen = 1;
+                } else {
+                    this.mouthOpen = 0.2;
+                }
+            }
+
+            draw(ctx) {
+                const { x, y } = this.getPos();
+                const r = this.radius;
+
+                // 1. Body (Yellow Circle)
+                ctx.beginPath();
+                ctx.arc(x, y, r, 0, Math.PI * 2);
+                ctx.fillStyle = this.color;
+                ctx.fill();
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 2;
+                ctx.stroke();
+
+                // 2. Red Bow (Simplified)
+                ctx.fillStyle = '#FF0000';
+                ctx.fillRect(x - r * 0.4, y - r * 0.3, r * 0.2, r * 0.4);
+                ctx.fillRect(x + r * 0.2, y - r * 0.3, r * 0.2, r * 0.4);
+
+                // 3. Animated Mouth
+                ctx.strokeStyle = '#000';
+                ctx.lineWidth = 2;
+                const mouthOffset = this.mouthOpen * 0.3;
+                const mouthY = y + mouthOffset;
+                
+                ctx.beginPath();
+                ctx.arc(x, mouthY, r * 0.3, 0, Math.PI, false);
+                ctx.stroke();
+            }
+        }
+
+        class Ghost extends Entity {
+            constructor(x, y, color, name) {
+                super(x, y, TILE_SIZE * 0.4, color);
+                this.name = name;
+                this.isScared = false;
+                this.scaredTimer = 0;
+                this.baseSpeed = 1;
+                this.currentSpeed = 1;
+                this.direction = { dx: 0, dy: 0 };
+                this.targetX = x;
+                this.targetY = y;
+            }
+
+            update(player) {
+                this.currentSpeed = this.baseSpeed * ghostSpeedMultiplier;
+
+                if (this.isScared) {
+                    this.scaredTimer--;
+                    if (this.scaredTimer <= 0) {
+                        this.isScared = false;
+                        this.color = this.originalColor;
+                    }
+                }
+
+                // AI Logic
+                if (!this.isScared) {
+                    this.chase(player);
+                } else {
+                    this.flee();
+                }
+
+                // Movement
+                let newX = this.gridX;
+                let newY = this.gridY;
+
+                if (this.direction.dx !== 0) {
+                    newX += this.direction.dx;
+                } else if (this.direction.dy !== 0) {
+                    newY += this.direction.dy;
+                }
+
+                if (this.isValidPosition(newX, newY)) {
+                    this.gridX = newX;
+                    this.gridY = newY;
+                    this.x = newX * TILE_SIZE + TILE_SIZE / 2;
+                    this.y = newY * TILE_SIZE + TILE_SIZE / 2;
+                }
+            }
+
+            chase(player) {
+                // Simple AI: Choose a random valid direction, biased towards the player
+                const possibleMoves = this.getValidNeighbors();
+                if (possibleMoves.length === 0) return;
+
+                let bestMove = null;
+                let minDistance = Infinity;
+
+                for (const move of possibleMoves) {
+                    const { nx, ny } = move;
+                    const dist = Math.hypot(nx - player.gridX, ny - player.gridY);
+                    
+                    // Bias: prefer moves that decrease distance
+                    if (dist < minDistance) {
+                        minDistance = dist;
+                        bestMove = move;
+                    }
+                }
+
+                if (bestMove) {
+                    this.direction = { dx: bestMove.nx - this.gridX, dy: bestMove.ny - this.gridY };
+                } else {
+                    // Fallback: random move
+                    const randomMove = possibleMoves[Math.floor(Math.random() * possibleMoves.length)];
+                    this.direction = { dx: randomMove.nx - this.gridX, dy: randomMove.ny - this.gridY };
+                }
+            }
+
+            flee() {
+                // Flee AI: Choose a random valid direction away from the player
+                const possibleMoves = this.getValidNeighbors();
+                if (possibleMoves.length === 0) return;
+
+                let bestMove = null;
+                let maxDistance = -Infinity;
+
+                for (const move of possibleMoves) {
+                    const { nx, ny } = move;
+                    const dist = Math.hypot(nx - player.gridX, ny - player.gridY);
+                    
+                    // Bias: prefer moves that increase distance
+                    if (dist > maxDistance) {
+                        maxDistance = dist;
+                        bestMove = move;
+                    }
+                }
+
+                if (bestMove) {
+                    this.direction = { dx: bestMove.nx - this.gridX, dy: bestMove.ny - this.gridY };
+                } else {
+                    // Fallback: random move
+                    const randomMove = possibleMoves[Math.floor(Math.random() * possibleMoves.length)];
+                    this.direction = { dx: randomMove.nx - this.gridX, dy: randomMove.ny - this.gridY };
+                }
+            }
+
+            getValidNeighbors() {
+                const neighbors = [];
+                const directions = [
+                    { dx: 1, dy: 0 }, { dx: -1, dy: 0 }, { dx: 0, dy: 1 }, { dx: 0, dy: -1 }
+                ];
+
+                for (const { dx, dy } of directions) {
+                    const nx = this.gridX + dx;
+                    const ny = this.gridY + dy;
+                    if (this.isValidPosition(nx, ny)) {
+                        neighbors.push({ nx, ny });
+                    }
+                }
+                return neighbors;
+            }
+
+            draw(ctx) {
+                const { x, y } = this.getPos();
+                const r = this.radius;
+
+                // Ghost Body
+                ctx.fillStyle = this.isScared ? '#0000FF' : this.color;
+                ctx.beginPath();
+                ctx.arc(x, y, r, 0, Math.PI * 2);
+                ctx.fill();
+
+                // Ghost Eyes
+                ctx.fillStyle = '#FFF';
+                let eyeOffsetX = 0;
+                let eyeOffsetY = 0;
+
+                if (this.isScared) {
+                    // Scared: Eyes centered
+                    eyeOffsetX = 0;
+                    eyeOffsetY = 0;
+                } else {
+                    // Normal: Eyes offset
+                    eyeOffsetX = r * 0.3;
+                    eyeOffsetY = -r * 0.2;
+                }
+
+                ctx.beginPath();
+                ctx.arc(x - eyeOffsetX, y + eyeOffsetY, r * 0.15, 0, Math.PI * 2);
+                ctx.arc(x + eyeOffsetX, y + eyeOffsetY, r * 0.15, 0, Math.PI * 2);
+                ctx.fill();
+            }
+        }
+
+        class Dot {
+            constructor(x, y) {
+                this.gridX = x;
+                this.gridY = y;
+                this.x = x * TILE_SIZE + TILE_SIZE / 2;
+                this.y = y * TILE_SIZE + TILE_SIZE / 2;
+                this.radius = TILE_SIZE * 0.15;
+            }
+
+            draw(ctx) {
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fillStyle = '#FFFF00';
+                ctx.fill();
+            }
+        }
+
+        class PowerPellet extends Dot {
+            constructor(x, y) {
+                super(x, y);
+                this.radius = TILE_SIZE * 0.5;
+                this.color = '#FFFF00';
+            }
+        }
+
+        class Fruit {
+            constructor(x, y) {
+                this.gridX = x;
+                this.gridY = y;
+                this.x = x * TILE_SIZE + TILE_SIZE / 2;
+                this.y = y * TILE_SIZE + TILE_SIZE / 2;
+                this.radius = TILE_SIZE * 0.3;
+                this.color = '#FF69B4'; // Cherry Pink
+                this.active = false;
+                this.spawnTime = 0;
+                this.duration = 5000; // 5 seconds
+            }
+
+            activate() {
+                this.active = true;
+                this.spawnTime = Date.now();
+            }
+
+            isExpired() {
+                return this.active && (Date.now() - this.spawnTime > this.duration);
+            }
+
+            draw(ctx) {
+                if (!this.active) return;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fillStyle = this.color;
+                ctx.fill();
+            }
+        }
+
+
+        // =====================================================================
+        // GAME INSTANTIATION
+        // =====================================================================
+
+        let player;
+        let dots = [];
+        let powerPellets = [];
+        let ghosts = [];
+        let fruit = new Fruit(10, 10);
+        let dotSpawnTimer = 0;
+        let fruitTimer = 0;
+        let lastFruitTime = 0;
+        let isPowerUpActive = false;
+
+        function initializeGame() {
+            // Reset State
+            score = 0;
+            lives = 3;
+            level = 1;
+            gameSpeed = 100;
+            ghostSpeedMultiplier = 1.0;
+            isPowerUpActive = false;
+            
+            // Setup Player (Starting position: 1, 1)
+            player = new MissPac(1, 1);
+            
+            // Setup Ghosts (Starting positions: 1, 8; 19, 8; 10, 1; 10, 19)
+            ghost = [
+                { x: 1, y: 8, color: '#FF0000', name: 'Blinky' },
+                { x: 19, y: 8, color: '#FFC0CB', name: 'Pinkey' },
+                { x: 10, y: 1, color: '#00FFFF', name: 'Cyan' },
+                { x: 10, y: 19, color: '#FFA500', name: 'Orange' }
+            ];
+            ghost.forEach(gData => {
+                const g = new Ghost(gData.x, gData.y, gData.color, gData.name);
+                g.originalColor = gData.color; // Store original color for scared state
+                ghost.push(g);
+            });
+
+            // Setup Dots and Pellets
+            dots = [];
+            powerPellets = [];
+            
+            // Fill paths with dots
+            for (let y = 0; y < GRID_ROWS; y++) {
+                for (let x = 0; x < GRID_COLS; x++) {
+                    if (MAZE[y][x] === 1) {
+                        // Don't place dots on starting positions
+                        if (!(x === 1 && y === 1) || !(x === 10 && y === 1) || !(x === 10 && y === 19) || !(x === 1 && y === 8) || !(x === 19 && y === 8)) {
+                            dots.push(new Dot(x, y));
+                        }
+                        // Place Power Pellets in corners
+                        if ((x === 0 && y === 0) || (x === GRID_COLS - 1 && y === 0) || (x === 0 && y === GRID_ROWS - 1) || (x === GRID_COLS - 1 && y === GRID_ROWS - 1)) {
+                            powerPellets.push(new PowerPellet(x, y));
+                        }
+                    }
+                }
+            }
+            
+            // Reset timers
+            dotSpawnTimer = 0;
+            fruitTimer = 0;
+            lastFruitTime = Date.now();
+            isPowerUpActive = false;
+            
+            // Ensure UI reflects starting state
+            document.getElementById('high-score-display').textContent = highscore;
+            updateHUD();
+        }
+
+        // =====================================================================
+        // GAME LOGIC AND UPDATES
+        // =====================================================================
+
+        function updateGame(deltaTime) {
+            if (gameState !== 'PLAY' || isPaused) return;
+
+            // 1. Player Input/Movement
+            // Player movement is handled by input listeners setting player.direction
+            player.update(player.gridX, player.gridY, gameSpeed);
+
+            // 2. Ghost Updates
+            ghost.forEach(g => g.update(player));
+
+            // 3. Dot Spawning
+            dotSpawnTimer += deltaTime;
+            if (dotSpawnTimer > 1500) { // Spawn a dot every 1.5 seconds
+                spawnDot();
+                dotSpawnTimer = 0;
+            }
+
+            // 4. Fruit Logic
+            const now = Date.now();
+            if (now - lastFruitTime > 15000) { // Every 15 seconds
+                fruit.activate();
+                lastFruitTime = now;
+            }
+            if (fruit.isExpired()) {
+                fruit.active = false;
+            }
+
+            // 5. Collision Detection
+            checkCollisions();
+
+            // 6. Level Clear Check
+            if (dots.length === 0) {
+                level++;
+                gameSpeed = Math.max(50, gameSpeed - 5); // Increase speed slightly
+                ghostSpeedMultiplier = 1.0 + (level * 0.1);
+                resetLevel();
+            }
+        }
+
+        function spawnDot() {
+            // Find a random path tile that doesn't have an object
+            let attempts = 0;
+            let newDot = null;
+            while (attempts < 100) {
+                const rx = Math.floor(Math.random() * GRID_COLS);
+                const ry = Math.floor(Math.random() * GRID_ROWS);
+                
+                if (MAZE[ry][rx] === 1) {
+                    const occupied = dots.some(d => d.gridX === rx && d.gridY === ry) ||
+                                      powerPellets.some(p => p.gridX === rx && p.gridY === ry) ||
+                                      ghost.some(g => g.gridX === rx && g.gridY === ry) ||
+                                      player.gridX === rx && player.gridY === ry;
+                    
+                    if (!occupied) {
+                        newDot = new Dot(rx, ry);
+                        break;
+                    }
+                }
+                attempts++;
+            }
+            if (newDot) {
+                dots.push(newDot);
+            }
+        }
+
+        function checkCollisions() {
+            const px = player.gridX;
+            const py = player.gridY;
+
+            // Dot Collision
+            for (let i = dots.length - 1; i >= 0; i--) {
+                const dot = dots[i];
+                if (dot.gridX === px && dot.gridY === py) {
+                    score += 10;
+                    dots.splice(i, 1);
+                    playAudio('blip');
+                }
+            }
+
+            // Power Pellet Collision
+            for (let i = powerPellets.length - 1; i >= 0; i--) {
+                const pellet = powerPellets[i];
+                if (pellet.gridX === px && pellet.gridY === py) {
+                    score += 50;
+                    powerPellets.splice(i, 1);
+                    isPowerUpActive = true;
+                    playAudio('power');
+                    // Activate power state for ghosts
+                    ghost.forEach(g => {
+                        g.isScared = true;
+                        g.scaredTimer = 7000; // 7 seconds
+                        g.color = '#0000FF'; // Blue
+                    });
+                }
+            }
+
+            // Fruit Collision
+            if (fruit.active && fruit.gridX === px && fruit.gridY === py) {
+                score += 100;
+                fruit.active = false;
+                playAudio('blip');
+            }
+
+            // Ghost Collision
+            for (const ghost of ghost) {
+                if (ghost.gridX === px && ghost.gridY === py) {
+                    handleGhostCollision(ghost);
+                    break;
+                }
+            }
+        }
+
+        function handleGhostCollision(ghost) {
+            if (isPowerUpActive && ghost.isScared) {
+                // Eat Scared Ghost
+                score += 200;
+                playAudio('eaten');
+                
+                // Reset ghost
+                ghost.gridX = 10;
+                ghost.gridY = 1; // Respawn at a safe spot
+                ghost.x = ghost.gridX * TILE_SIZE + TILE_SIZE / 2;
+                ghost.y = ghost.gridY * TILE_SIZE + TILE_SIZE / 2;
+                ghost.isScared = false;
+                ghost.color = ghost.originalColor;
+                
+                // Power up ends after one kill
+                isPowerUpActive = false;
+            } else {
+                // Player dies
+                lives--;
+                playAudio('death');
+                
+                if (lives <= 0) {
+                    gameOver();
+                } else {
+                    // Reset player position
+                    player.gridX = 1;
+                    player.gridY = 1;
+                    player.x = player.gridX * TILE_SIZE + TILE_SIZE / 2;
+                    player.y = player.gridY * TILE_SIZE + TILE_SIZE / 2;
+                    
+                    // Briefly pause to show death
+                    gameState = 'PAUSE';
+                    setTimeout(() => {
+                        gameState = 'PLAY';
+                        updateHUD();
+                    }, 1500);
+                }
+            }
+        }
+
+        function resetLevel() {
+            // Clear dots and respawn them
+            dots = [];
+            for (let y = 0; y < GRID_ROWS; y++) {
+                for (let x = 0; x < GRID_COLS; x++) {
+                    if (MAZE[y][x] === 1) {
+                        if (!(x === 1 && y === 1) || !(x === 10 && y === 1) || !(x === 10 && y === 19) || !(x === 1 && y === 8) || !(x === 19 && y === 8)) {
+                            dots.push(new Dot(x, y));
+                        }
+                    }
+                }
+            }
+            // Reset ghosts
+            ghost.forEach(g => {
+                g.gridX = g.originalX || 1;
+                g.gridY = g.originalY || 8;
+                g.x = g.gridX * TILE_SIZE + TILE_SIZE / 2;
+                g.y = g.gridY * TILE_SIZE + TILE_SIZE / 2;
+            });
+            
+            updateHUD();
+        }
+
+        function gameOver() {
+            gameState = 'GAMEOVER';
+            if (score > highscore) {
+                highscore = score;
+                localStorage.setItem('pacMazeHighScore', highscore);
+            }
+            document.getElementById('final-score').textContent = score;
+            document.getElementById('final-high-score').textContent = highscore;
+            document.getElementById('game-over-screen').classList.remove('hidden');
+        }
+
+        function updateHUD() {
+            document.getElementById('score-display').textContent = `SCORE: ${score}`;
+            
+            let livesHtml = 'LIVES: ';
+            for (let i = 0; i < 3; i++) {
+                livesHtml += (i < lives ? '❤️ ' : '🖤 ');
+            }
+            document.getElementById('lives-display').textContent = livesHtml;
+        }
+
+        // =====================================================================
+        // RENDERING
+        // =====================================================================
+
+        function drawGame() {
+            // 1. Clear Canvas
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+            // 2. Draw Maze (Walls and Paths)
+            for (let y = 0; y < GRID_ROWS; y++) {
+                for (let x = 0; x < GRID_COLS; x++) {
+                    if (MAZE[y][x] === 0) {
+                        ctx.fillStyle = '#0000FF'; // Blue Walls
+                        ctx.fillRect(x * TILE_SIZE, y * TILE_SIZE, TILE_SIZE, TILE_SIZE);
+                    } else {
+                        // Paths are black (implicitly handled by clear)
+                    }
+                }
+            }
+
+            // 3. Draw Entities
+            dots.forEach(d => d.draw(ctx));
+            powerPellets.forEach(p => p.draw(ctx));
+            fruit.draw(ctx);
+            ghost.forEach(g => g.draw(ctx));
+            player.draw(ctx);
+
+            // 4. Apply CRT Effects
+            applyCRT(ctx);
+        }
+
+        function applyCRT(ctx) {
+            const w = canvas.width;
+            const h = canvas.height;
+
+            // Vignette (Dark edges)
+            const gradient = ctx.createRadialGradient,
+                x = w / 2, y = h / 2;
+            
+            gradient.addColorStop(0, 'rgba(0, 0, 0, 0)');
+            gradient.addColorStop(1, 'rgba(0, 0, 0, 0.8)');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, w, h);
+
+            // Scanlines
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.3)';
+            const lineSpacing = 4;
+            for (let i = 0; i < h; i += lineSpacing) {
+                ctx.fillRect(0, i, w, 1);
+            }
+        }
+
+        // =====================================================================
+        // GAME LOOP
+        // =====================================================================
+
+        function gameLoop(timestamp) {
+            const deltaTime = timestamp - lastUpdateTime;
+            lastUpdateTime = timestamp;
+
+            if (gameState === 'PLAY') {
+                updateGame(deltaTime);
+                drawGame();
+            } else if (gameState === 'PAUSE') {
+                // Redraw game state while paused
+                drawGame();
+                drawPauseOverlay();
+            } else if (gameState === 'START' || gameState === 'GAMEOVER') {
+                // Draw static screens
+                drawStaticScreen();
+            }
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        function drawStaticScreen() {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.9)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            ctx.fillStyle = '#FF00FF';
+            ctx.font = '40px "Courier New"';
+            ctx.textAlign = 'center';
+            
+            if (gameState === 'START') {
+                ctx.fillText("MISS PAC-MAZE", canvas.width / 2, canvas.height / 3);
+                ctx.font = '20px "Courier New"';
+                ctx.fillText("PRESS SPACE TO START", canvas.width / 2, canvas.height / 2);
+            } else if (gameState === 'GAMEOVER') {
+                ctx.font = '60px "Courier New"';
+                ctx.fillText("GAME OVER", canvas.width / 2, canvas.height / 3);
+                ctx.font = '25px "Courier New"';
+                ctx.fillText("Press Restart", canvas.width / 2, canvas.height / 2);
+            }
+        }
+        
+        function drawPauseOverlay() {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+            ctx.fillRect(0, 0, canvas.width, canvas.height);
+            
+            ctx.fillStyle = '#FFFFFF';
+            ctx.font = '60px "Courier New"';
+            ctx.textAlign = 'center';
+            ctx.fillText("PAUSED", canvas.width / 2, canvas.height / 2);
+        }
+
+        // =====================================================================
+        // AUDIO (Web Audio API)
+        // =====================================================================
+
+        const AudioContext = window.AudioContext || window.webkitAudioContext;
+        let audioCtx;
+        let isMutedGlobal = false;
+
+        function initAudio() {
+            try {
+                audioCtx = new AudioContext();
+            } catch (e) {
+                console.warn("Web Audio API not supported.");
+            }
+        }
+
+        function playSound(frequency, duration, type, volume) {
+            if (isMutedGlobal || !audioCtx) return;
+
+            const oscillator = audioCtx.createOscillator();
+            const gainNode = audioCtx.createGain();
+
+            oscillator.type = type; // sine, square, sawtooth, triangle
+            oscillator.frequency.setValueAtTime(frequency, audioCtx.currentTime);
+            gainNode.gain.setValueAtTime(volume, audioCtx.currentTime);
+
+            oscillator.connect(gainNode);
+            gainNode.connect(audioCtx.destination);
+
+            oscillator.start();
+            oscillator.stop(audioCtx.currentTime + duration / 1000);
+        }
+
+        function playAudio(type) {
+            if (type === 'blip') {
+                playSound(880, 100, 'square', 0.3);
+            } else if (type === 'power') {
+                playSound(440, 500, 'sawtooth', 0.5);
+            } else if (type === 'eaten') {
+                playSound(120, 200, 'sine', 0.4);
+            } else if (type === 'death') {
+                playSound(100, 800, 'sawtooth', 0.6);
+            }
+        }
+
+        // =====================================================================
+        // INPUT HANDLING
+        // =====================================================================
+
+        function setPlayerDirection(dx, dy) {
+            if (gameState !== 'PLAY') return;
+            
+            // Prevent diagonal movement
+            if (dx !== 0 && dy !== 0) return;
+            
+            player.direction = { dx: dx, dy: dy };
+        }
+
+        document.addEventListener('keydown', (e) => {
+            if (e.key === 'ArrowUp' || e.key.toLowerCase() === 'w') setPlayerDirection(0, -1);
+            if (e.key === 'ArrowDown' || e.key.toLowerCase() === 's') setPlayerDirection(0, 1);
+            if (e.key === 'ArrowLeft' || e.key.toLowerCase() === 'a') setPlayerDirection(-1, 0);
+            if (e.key === 'ArrowRight' || e.key.toLowerCase() === 'd') setPlayerDirection(1, 0);
+
+            if (e.key === ' ' && gameState === 'START') {
+                startGame();
+            } else if (e.key === ' ' && gameState === 'GAMEOVER') {
+                startGame();
+            } else if (e.key.toLowerCase() === 'p' && gameState === 'PLAY') {
+                isPaused = !isPaused;
+            } else if (e.key.toLowerCase() === 'm') {
+                isMutedGlobal = !isMutedGlobal;
+            }
+        });
+
+        // Mobile/Touch Controls (Simplified: directional buttons or swipe detection)
+        let touchStartX = 0;
+        let touchStartY = 0;
+
+        canvas.addEventListener('touchstart', (e) => {
+            e.preventDefault();
+            const touch = e.touches[0];
+            touchStartX = touch.clientX;
+            touchStartY = touch.clientY;
+        });
+
+        canvas.addEventListener('touchend', (e) => {
+            if (gameState !== 'PLAY') return;
+            const touch = e.changedTouches[0];
+            const dx = touch.clientX - touchStartX;
+            const dy = touch.clientY - touchStartY;
+            
+            // Threshold for movement detection
+            const threshold = 30; 
+
+            if (Math.abs(dx) > Math.abs(dy) && Math.abs(dx) > threshold) {
+                setPlayerDirection(dx > 0 ? 1 : -1, 0);
+            } else if (Math.abs(dy) > Math.abs(dx) && Math.abs(dy) > threshold) {
+                setPlayerDirection(0, dy > 0 ? 1 : -1);
+            }
+        });
+
+
+        // =====================================================================
+        // GAME CONTROL FUNCTIONS
+        // =====================================================================
+
+        function startGame() {
+            if (gameState === 'PLAY') return; // Already running
+            
+            initializeGame();
+            gameState = 'PLAY';
+            isPaused = false;
+            document.getElementById('start-screen').classList.add('hidden');
+            document.getElementById('game-over-screen').classList.add('hidden');
+            updateHUD();
+        }
+
+        // Initialize the game environment
+        window.onload = () => {
+            initAudio();
+            initializeGame(); // Setup initial state
+            requestAnimationFrame(gameLoop); // Start the loop
+        };
+
+    </script>
+</body>
+</html>

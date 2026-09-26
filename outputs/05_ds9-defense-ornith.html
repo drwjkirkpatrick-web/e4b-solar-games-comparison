@@ -1,0 +1,815 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>DS9 DEFENSE</title>
+    <style>
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            font-family: 'Courier New', Courier, monospace;
+        }
+        canvas {
+            border: 2px solid #00ffff;
+            background-color: #000814;
+            display: block;
+        }
+        #ui-overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            color: #00ffff;
+            text-shadow: 0 0 5px #00ffff;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+    <div id="ui-overlay">
+        <div id="menu-screen" style="display: block; text-align: center; padding-top: 150px;">
+            <h1 style="font-size: 80px; color: #00ffff; text-shadow: 0 0 10px #00ffff;">DS9 DEFENSE</h1>
+            <p id="start-prompt" style="font-size: 30px; margin-top: 20px; color: #ff00ff;">CLICK TO DEFEND</p>
+            <p style="font-size: 18px; margin-top: 50px;">Controls: Mouse Aim/Click to Fire | R to Repair | M to Mute</p>
+        </div>
+        <div id="game-over-screen" style="display: none; text-align: center; padding-top: 150px;">
+            <h1 id="game-over-title" style="font-size: 80px; color: #ff0000; text-shadow: 0 0 10px #ff0000;">STATION DESTROYED</h1>
+            <p id="final-score" style="font-size: 30px; margin-top: 20px;"></p>
+            <p style="font-size: 20px; margin-top: 40px;">Press R to Restart</p>
+        </div>
+        <div id="victory-screen" style="display: none; text-align: center; padding-top: 150px;">
+            <h1 style="font-size: 80px; color: #ffd700; text-shadow: 0 0 10px #ffd700;">ALL WAVES CLEARED!</h1>
+            <p id="final-score-victory" style="font-size: 30px; margin-top: 20px;"></p>
+            <p style="font-size: 20px; margin-top: 40px;">Press R to Play Again</p>
+        </div>
+        <div id="hud" style="position: absolute; top: 10px; left: 10px; width: 780px; pointer-events: none;">
+            <div style="display: flex; justify-content: space-between; font-size: 24px; color: #00ffff;">
+                <span>SCORE: <span id="score-display">0</span></span>
+                <span>WAVE: <span id="wave-display">1</span> / 10</span>
+                <span>ENEMIES LEFT: <span id="enemies-left-display">0</span></span>
+            </div>
+            <div style="margin-top: 10px; width: 100%; height: 20px; border: 1px solid #00ffff;">
+                <div id="shield-bar" style="height: 100%; width: 100%; background-color: #00ffff; transition: width 0.1s;"></div>
+            </div>
+            <div style="margin-top: 5px; width: 100%; height: 15px; border: 1px solid #ff00ff;">
+                <div id="battery-bar" style="height: 100%; width: 100%; background-color: #ff00ff; transition: width 0.1s;"></div>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // =================================================================
+        // CORE GAME SETUP
+        // =================================================================
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const WIDTH = canvas.width;
+        const HEIGHT = canvas.height;
+        const CENTER_X = WIDTH / 2;
+        const CENTER_Y = HEIGHT / 2;
+
+        let gameLoopId;
+        let gameState = 'menu'; // menu, playing, gameover, victory
+        let score = 0;
+        let highScore = localStorage.getItem('ds9HighScore') || 0;
+        let lastTime = 0;
+        let screenShake = 0;
+
+        // Game Constants
+        const STATION_RADIUS = 100;
+        const SHIELD_RADIUS = 200;
+        const SHIELD_MAX_HP = 100;
+        const MAX_WAVES = 10;
+
+        // Game State Variables
+        let station = {
+            hp: SHIELD_MAX_HP,
+            rotation: 0,
+            isHit: false,
+            repairRate: 0.5, // HP per frame
+            isRepairing: false,
+            canFire: true,
+            overheatTimer: 0,
+            maxEnergy: 100,
+            currentEnergy: 100,
+            energyRegen: 2,
+            fireRate: 10, // Energy cost per shot
+            overheatDuration: 2000 // 2 seconds in ms
+        };
+
+        let enemies = [];
+        let projectiles = [];
+        let particles = [];
+        let wave = 0;
+        let enemiesToSpawn = 0;
+        let enemiesKilledThisWave = 0;
+
+        // Input handling
+        const keys = {};
+        window.addEventListener('keydown', (e) => {
+            keys[e.key.toLowerCase()] = true;
+            if (e.key.toLowerCase() === 'm') toggleMute();
+        });
+        window.addEventListener('keyup', (e) => {
+            keys[e.key.toLowerCase()] = false;
+        });
+        canvas.addEventListener('click', handleMouseClick);
+        canvas.addEventListener('mousemove', handleMouseMove);
+
+        let mousePos = { x: CENTER_X, y: CENTER_Y };
+        let isMuted = false;
+
+        // =================================================================
+        // AUDIO ENGINE (Web Audio API)
+        // =================================================================
+        const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        let gainNode = audioCtx.createGain();
+        gainNode.gain.value = 1.0;
+        gainNode.connect(audioCtx.destination);
+
+        function setVolume(vol) {
+            gainNode.gain.setValueAtTime(vol, audioCtx.currentTime);
+        }
+
+        function playSound(type) {
+            if (isMuted) return;
+            const osc = audioCtx.createOscillator();
+            const gain = audioCtx.createGain();
+            osc.connect(gain);
+            gain.connect(gainNode);
+
+            let freq, duration, attack, decay;
+
+            switch (type) {
+                case 'phas':
+                    freq = 880; duration = 0.1; attack = 0.01; decay = 0.2;
+                    break;
+                case 'explosion':
+                    freq = 150; duration = 0.3; attack = 0.05; decay = 0.5;
+                    break;
+                case 'hit':
+                    freq = 100; duration = 0.2; attack = 0.01; decay = 0.1;
+                    break;
+                case 'wave_start':
+                    freq = 220; duration = 1.0; attack = 0.1; decay = 0.8;
+                    break;
+                case 'victory':
+                    freq = 440; duration = 2.0; attack = 0.5; decay = 1.0;
+                    break;
+                default: return;
+            }
+
+            osc.frequency.setValueAtTime(freq, audioCtx.currentTime);
+            gain.gain.setValueAtTime(0, audioCtx.currentTime);
+            gain.gain.linearRampToValueAtTime(0.5, audioCtx.currentTime + attack);
+            gain.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + attack + duration);
+
+            osc.start(audioCtx.currentTime);
+            osc.stop(audioCtx.currentTime + duration);
+        }
+
+        function toggleMute() {
+            isMuted = !isMuted;
+            document.getElementById('ui-overlay').style.opacity = isMuted ? 0.5 : 1.0;
+        }
+
+        // =================================================================
+        // ENTITY CLASSES
+        // =================================================================
+
+        class Projectile {
+            constructor(x, y, vx, vy, color, damage) {
+                this.x = x;
+                this.y = y;
+                this.vx = vx;
+                this.vy = vy;
+                this.color = color;
+                this.damage = damage;
+                this.radius = 3;
+            }
+
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+            }
+
+            draw() {
+                ctx.fillStyle = this.color;
+                ctx.beginPath();
+                ctx.arc(this.x, this.y, this.radius, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            isOffScreen() {
+                return this.x < 0 || this.x > WIDTH || this.y < 0 || this.y > HEIGHT;
+            }
+        }
+
+        class Particle {
+            constructor(x, y, color) {
+                this.x = x;
+                this.y = y;
+                this.color = color;
+                this.vx = (Math.random() - 0.5) * 5;
+                this.vy = (Math.random() - 0.5) * 5;
+                this.life = 30; // Frames
+                this.size = Math.random() * 3 + 1;
+            }
+
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.vy += 0.1; // Gravity effect
+                this.life--;
+            }
+
+            draw() {
+                ctx.fillStyle = this.color;
+                ctx.globalAlpha = this.life / 30;
+                ctx.fillRect(this.x, this.y, this.size, this.size);
+                ctx.globalAlpha = 1.0;
+            }
+        }
+
+        class Enemy {
+            constructor(type, hp, damage, speed, scoreValue) {
+                this.type = type;
+                this.hp = hp;
+                this.damage = damage;
+                this.speed = speed;
+                this.scoreValue = scoreValue;
+                this.size = 20;
+                this.x = Math.random() * WIDTH;
+                this.y = -50; // Start off screen
+                this.angle = Math.atan2(CENTER_Y - this.y, CENTER_X - this.x);
+                this.targetX = CENTER_X;
+                this.targetY = CENTER_Y;
+                this.lastShotTime = 0;
+            }
+
+            update() {
+                // Move towards the station
+                let dx = this.targetX - this.x;
+                let dy = this.targetY - this.y;
+                let dist = Math.sqrt(dx * dx + dy * dy);
+
+                if (dist > 1) {
+                    this.x += (dx / dist) * this.speed;
+                    this.y += (dy / dist) * this.speed;
+                }
+
+                // AI: Shooting logic
+                if (this.type !== 'battleship' && Date.now() - this.lastShotTime > 1500) {
+                    let distToStation = Math.sqrt(Math.pow(this.x - CENTER_X, 2) + Math.pow(this.y - CENTER_Y, 2));
+                    if (distToStation < SHIELD_RADIUS * 0.8) {
+                        let angleToStation = Math.atan2(CENTER_Y - this.y, CENTER_X - this.x);
+                        let vx = Math.cos(angleToStation) * 5;
+                        let vy = Math.sin(angleToStation) * 5;
+                        projectiles.push(new Projectile(this.x, this.y, vx, vy, '#ff0000', this.damage));
+                        this.lastShotTime = Date.now();
+                    }
+                }
+            }
+
+            draw() {
+                ctx.strokeStyle = this.type === 'scout' ? '#ff0000' : (this.type === 'cruiser' ? '#8a2be2' : '#333333');
+                ctx.fillStyle = this.type === 'scout' ? '#ff0000' : (this.type === 'cruiser' ? '#8a2be2' : '#444444');
+                ctx.lineWidth = 2;
+
+                // Draw ship body (simple triangle/square)
+                ctx.beginPath();
+                ctx.moveTo(this.x, this.y - this.size);
+                ctx.lineTo(this.x + this.size, this.y + this.size);
+                ctx.lineTo(this.x - this.size, this.y + this.size);
+                ctx.closePath();
+                ctx.fill();
+                ctx.stroke();
+
+                // Draw HP bar
+                let hpRatio = this.hp / (this.type === 'scout' ? 1 : (this.type === 'cruiser' ? 3 : 10));
+                ctx.fillStyle = 'red';
+                ctx.fillRect(this.x - 15, this.y - 30, 30 * hpRatio, 3);
+            }
+
+            takeDamage(amount) {
+                this.hp -= amount;
+                if (this.hp <= 0) {
+                    return true; // Killed
+                }
+                return false; // Still alive
+            }
+        }
+
+        // =================================================================
+        // GAME LOGIC FUNCTIONS
+        // =================================================================
+
+        function handleMouseClick() {
+            if (gameState !== 'playing' || !station.canFire) return;
+
+            // Calculate direction to mouse
+            const dx = mousePos.x - CENTER_X;
+            const dy = mousePos.y - CENTER_Y;
+            const angle = Math.atan2(dy, dx);
+
+            // Fire phaser bolt
+            const speed = 10;
+            const vx = Math.cos(angle) * speed;
+            const vy = Math.sin(angle) * speed;
+
+            projectiles.push(new Projectile(CENTER_X, CENTER_Y, vx, vy, '#00ffff', 10));
+            
+            // Update battery and check for overheat
+            station.currentEnergy -= station.fireRate;
+            if (station.currentEnergy < 0) {
+                station.currentEnergy = 0;
+                station.overheatTimer = station.overheatDuration;
+                station.canFire = false;
+            }
+        }
+
+        function handleMouseMove(e) {
+            const rect = canvas.getBoundingClientRect();
+            mousePos.x = e.clientX - rect.left;
+            mousePos.y = e.clientY - rect.top;
+        }
+
+        function updateStation(dt) {
+            // Repair logic
+            if (keys['r'] && station.currentEnergy > 0 && station.hp < SHIELD_MAX_HP) {
+                station.isRepairing = true;
+                station.currentEnergy -= 0.5; // Drain energy while repairing
+                station.hp += station.repairRate;
+                station.hp = Math.min(station.hp, SHIELD_MAX_HP);
+            } else {
+                station.isRepairing = false;
+            }
+
+            // Energy regeneration
+            if (station.overheatTimer <= 0) {
+                station.currentEnergy = Math.min(station.maxEnergy, station.currentEnergy + station.energyRegen);
+            }
+
+            // Overheat timer
+            if (station.overheatTimer > 0) {
+                station.overheatTimer -= dt;
+                if (station.overheatTimer <= 0) {
+                    station.canFire = true;
+                }
+            } else {
+                station.canFire = true;
+            }
+        }
+
+        function updateEnemies() {
+            enemies.forEach(enemy => {
+                enemy.update();
+            });
+
+            // Clean up dead enemies
+            enemies = enemies.filter(enemy => {
+                if (enemy.hp <= 0) {
+                    score += enemy.scoreValue;
+                    enemiesKilledThisWave++;
+                    return false;
+                }
+                return true;
+            });
+        }
+
+        function updateProjectiles() {
+            projectiles.forEach(p => p.update());
+            projectiles = projectiles.filter(p => !p.isOffScreen());
+        }
+
+        function updateParticles() {
+            particles.forEach(p => p.update());
+            particles = particles.filter(p => p.life > 0);
+        }
+
+        function checkCollisions() {
+            // 1. Phaser vs Enemy
+            projectiles.forEach((p, pIndex) => {
+                enemies.forEach((e, eIndex) => {
+                    // Simple distance check for collision (circle vs circle approximation)
+                    const dx = p.x - e.x;
+                    const dy = p.y - e.y;
+                    const dist = Math.sqrt(dx * dx + dy * dy);
+
+                    if (dist < e.size + p.radius) {
+                        const killed = e.takeDamage(p.damage);
+                        if (killed) {
+                            // Trigger explosion particle effect
+                            for (let i = 0; i < 5; i++) {
+                                particles.push(new Particle(e.x, e.y, '#ff6600'));
+                            }
+                        }
+                        // Remove projectile
+                        projectiles.splice(pIndex, 1);
+                    }
+                });
+            });
+
+            // 2. Enemy vs Shield/Station
+            enemies.forEach(e => {
+                const dx = e.x - CENTER_X;
+                const dy = e.y - CENTER_Y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+
+                if (dist < SHIELD_RADIUS) {
+                    // Hit the shield
+                    if (!station.isHit) {
+                        station.isHit = true;
+                        playSound('hit');
+                        // Screen shake effect
+                        screenShake = 10;
+                    }
+                    
+                    // Reduce shield HP
+                    station.hp -= e.damage;
+                    station.isHit = false; // Reset hit state after damage application
+                    
+                    // Create impact particles
+                    for (let i = 0; i < 3; i++) {
+                        particles.push(new Particle(e.x, e.y, '#ff0000'));
+                    }
+                }
+            });
+        }
+
+        function spawnEnemies() {
+            if (enemiesKilledThisWave >= enemiesToSpawn) {
+                if (wave < MAX_WAVES) {
+                    wave++;
+                    enemiesToSpawn = calculateWaveSize(wave);
+                    enemiesKilledThisWave = 0;
+                    playSound('wave_start');
+                    document.getElementById('wave-display').textContent = wave;
+                } else {
+                    // Victory
+                    gameState = 'victory';
+                    playSound('victory');
+                }
+                return;
+            }
+
+            // Spawn new enemy
+            let type = 'scout';
+            let hp = 1;
+            let dmg = 5;
+            let speed = 3;
+            let scoreValue = 100;
+
+            if (wave >= 5) {
+                type = 'cruiser';
+                hp = 3;
+                dmg = 10;
+                speed = 2;
+                scoreValue = 250;
+            }
+            if (wave === MAX_WAVES) {
+                type = 'battleship';
+                hp = 10;
+                dmg = 20;
+                speed = 1;
+                scoreValue = 500;
+            }
+
+            enemies.push(new Enemy(type, hp, dmg, speed, scoreValue));
+            enemiesToSpawn--;
+        }
+
+        function calculateWaveSize(w) {
+            if (w === 1) return 5;
+            if (w === 5) return 10;
+            if (w === 10) return 15;
+            return 5 + (w * 2);
+        }
+
+        function updateUI() {
+            document.getElementById('score-display').textContent = score;
+            document.getElementById('wave-display').textContent = wave;
+            document.getElementById('enemies-left-display').textContent = enemies.length;
+
+            // Shield Bar
+            const shieldRatio = Math.max(0, station.hp / SHIELD_MAX_HP);
+            const shieldBar = document.getElementById('shield-bar');
+            shieldBar.style.width = `${shieldRatio * 100}%`;
+            
+            // Shield color flash
+            if (station.isHit) {
+                shieldBar.style.backgroundColor = '#ff0000';
+            } else if (shieldRatio < 0.3) {
+                 shieldBar.style.backgroundColor = '#ffaa00';
+            } else {
+                shieldBar.style.backgroundColor = '#00ffff';
+            }
+
+            // Battery Bar
+            const batteryRatio = station.currentEnergy / station.maxEnergy;
+            const batteryBar = document.getElementById('battery-bar');
+            batteryBar.style.width = `${batteryRatio * 100}%`;
+            batteryBar.style.backgroundColor = batteryRatio > 0.2 ? '#ff00ff' : '#880000';
+        }
+
+        function drawStation() {
+            ctx.save();
+            ctx.translate(CENTER_X, CENTER_Y);
+            ctx.rotate(station.rotation);
+
+            // 1. Draw Torus (Simplified ring)
+            ctx.strokeStyle = '#aaaaaa';
+            ctx.lineWidth = 5;
+            ctx.beginPath();
+            ctx.arc(0, 0, STATION_RADIUS, 0, Math.PI * 2);
+            ctx.stroke();
+
+            // 2. Draw Panels/Structure
+            ctx.fillStyle = '#333333';
+            ctx.beginPath();
+            ctx.arc(0, 0, STATION_RADIUS - 10, 0, Math.PI * 2);
+            ctx.fill();
+
+            // 3. Draw Pylons (6)
+            const pylons = 6;
+            ctx.fillStyle = '#00ffff';
+            for (let i = 0; i < pylons; i++) {
+                const angle = (i / pylons) * Math.PI * 2;
+                const px = Math.cos(angle) * (STATION_RADIUS - 30);
+                const py = Math.sin(angle) * (STATION_RADIUS - 30);
+                ctx.fillRect(px - 3, py - 15, 6, 30);
+            }
+
+            // 4. Draw Blue Lights (Rotating)
+            ctx.fillStyle = '#00ffff';
+            for (let i = 0; i < 12; i++) {
+                const angle = (i / 12) * Math.PI * 2 + station.rotation;
+                const lx = Math.cos(angle) * (STATION_RADIUS - 10);
+                const ly = Math.sin(angle) * (STATION_RADIUS - 10);
+                ctx.beginPath();
+                ctx.arc(lx, ly, 3, 0, Math.PI * 2);
+                ctx.fill();
+            }
+
+            ctx.restore();
+        }
+
+        function drawShield() {
+            ctx.save();
+            ctx.beginPath();
+            ctx.arc(CENTER_X, CENTER_Y, SHIELD_RADIUS, 0, Math.PI * 2);
+            
+            // Shield color based on HP
+            if (station.hp > SHIELD_MAX_HP * 0.5) {
+                ctx.strokeStyle = '#00ffff';
+            } else if (station.hp > 0) {
+                ctx.strokeStyle = '#ffaa00';
+            } else {
+                ctx.strokeStyle = '#ff0000';
+            }
+            
+            ctx.lineWidth = 5;
+            ctx.shadowColor = ctx.strokeStyle;
+            ctx.shadowBlur = 15;
+            ctx.stroke();
+            ctx.shadowBlur = 0; // Reset shadow
+            ctx.restore();
+        }
+
+        function drawBackground() {
+            // 1. Nebula (Simple gradient/shape)
+            const gradient = ctx.createRadialGradient
+                (WIDTH / 2, HEIGHT / 2, 50, WIDTH / 2, HEIGHT / 2, 400);
+            gradient.addColorStop(0, 'rgba(0, 50, 100, 0.1)');
+            gradient.addColorStop(1, 'rgba(0, 0, 0, 0)');
+            ctx.fillStyle = gradient;
+            ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+            // 2. Stars (Parallax effect)
+            ctx.fillStyle = '#ffffff';
+            for (let i = 0; i < 200; i++) {
+                const starX = (i * 137.5) % WIDTH;
+                const starY = (i * 71.5) % HEIGHT;
+                const size = Math.random() * 1.5;
+                
+                // Parallax movement based on time
+                const offsetX = Math.sin(Date.now() * 0.0001 + i) * 5;
+                const offsetY = Math.cos(Date.now() * 0.0001 + i) * 5;
+
+                ctx.fillRect(starX + offsetX, starY + offsetY, size, size);
+            }
+        }
+
+        // =================================================================
+        // GAME LOOP
+        // =================================================================
+
+        function gameLoop(timestamp) {
+            const dt = timestamp - lastTime;
+            lastTime = timestamp;
+
+            // Apply screen shake
+            const shakeX = screenShake * (Math.random() * 2 - 1);
+            const shakeY = screenShake * (Math.random() * 2 - 1);
+
+            ctx.clearRect(0, 0, WIDTH, HEIGHT);
+
+            // Draw background first
+            drawBackground();
+
+            if (gameState === 'playing') {
+                // Update logic
+                updateStation(dt);
+                updateEnemies();
+                updateProjectiles();
+                updateParticles();
+                spawnEnemies();
+                checkCollisions();
+
+                // Draw logic
+                drawShield();
+                drawStation();
+                
+                // Draw entities
+                enemies.forEach(e => e.draw());
+                projectiles.forEach(p => p.draw());
+                particles.forEach(p => p.draw());
+                
+                updateUI();
+            } else if (gameState === 'menu') {
+                // Draw menu state (handled by HTML overlay)
+            } else if (gameState === 'gameover') {
+                // Draw game over state (handled by HTML overlay)
+            } else if (gameState === 'victory') {
+                // Draw victory state (handled by HTML overlay)
+            }
+
+            // Apply shake transformation
+            ctx.save();
+            ctx.translate(shakeX, shakeY);
+            
+            // Request next frame
+            gameLoopId = requestAnimationFrame(gameLoop);
+            ctx.restore();
+        }
+
+        function resetGame() {
+            score = 0;
+            wave = 0;
+            station.hp = SHIELD_MAX_HP;
+            station.currentEnergy = 100;
+            station.overheatTimer = 0;
+            station.canFire = true;
+            enemies = [];
+            projectiles = [];
+            particles = [];
+            enemiesToSpawn = 0;
+            gameState = 'playing';
+            
+            // UI updates
+            document.getElementById('menu-screen').style.display = 'none';
+            document.getElementById('game-over-screen').style.display = 'none';
+            document.getElementById('victory-screen').style.display = 'none';
+        }
+
+        function startGame() {
+            if (gameState === 'menu' || gameState === 'gameover' || gameState === 'victory') {
+                resetGame();
+                lastTime = performance.now();
+                gameLoop(lastTime);
+            }
+        }
+
+        // =================================================================
+        // INITIALIZATION AND EVENT LISTENERS
+        // =================================================================
+
+        // Handle Game State Transitions
+        document.getElementById('start-prompt').onclick = startGame;
+        
+        // Handle Game Over/Victory Restart
+        document.getElementById('game-over-screen').addEventListener('click', () => {
+            if (gameState === 'gameover') {
+                startGame();
+            }
+        });
+        document.getElementById('victory-screen').addEventListener('click', () => {
+            if (gameState === 'victory') {
+                startGame();
+            }
+        });
+
+        // Game Over/Victory Logic
+        function checkGameOver() {
+            if (station.hp <= 0) {
+                gameState = 'gameover';
+                playSound('explosion');
+                document.getElementById('game-over-title').textContent = "STATION DESTROYED";
+                document.getElementById('final-score').textContent = `Final Score: ${score}`;
+                
+                if (score > highScore) {
+                    highScore = score;
+                    localStorage.setItem('ds9HighScore', highScore);
+                }
+                document.getElementById('game-over-screen').style.display = 'block';
+            }
+        }
+
+        function checkVictory() {
+            if (wave >= MAX_WAVES && enemies.length === 0) {
+                gameState = 'victory';
+                document.getElementById('final-score-victory').textContent = `Final Score: ${score}`;
+                document.getElementById('victory-screen').style.display = 'block';
+            }
+        }
+
+        // Main Update Loop Wrapper
+        function mainUpdate() {
+            if (gameState === 'playing') {
+                checkGameOver();
+                checkVictory();
+            }
+        }
+
+        // Start the loop management
+        function initialize() {
+            // Set initial high score display
+            document.getElementById('high-score-display').textContent = highScore;
+            
+            // Initial UI setup
+            updateUI();
+
+            // Start the game loop with the initial state
+            gameLoop(0); 
+        }
+
+        // Override the game loop to include the state checks
+        const originalGameLoop = gameLoop;
+        gameLoop = function(timestamp) {
+            const dt = timestamp - lastTime;
+            lastTime = timestamp;
+
+            // Apply screen shake
+            const shakeX = screenShake * (Math.random() * 2 - 1);
+            const shakeY = screenShake * (Math.random() * 2 - 1);
+
+            ctx.clearRect(0, 0, WIDTH, HEIGHT);
+
+            // Draw background first
+            drawBackground();
+
+            if (gameState === 'playing') {
+                // Update logic
+                updateStation(dt);
+                updateEnemies();
+                updateProjectiles();
+                updateParticles();
+                spawnEnemies();
+                checkCollisions();
+
+                // Draw logic
+                drawShield();
+                drawStation();
+                
+                // Draw entities
+                enemies.forEach(e => e.draw());
+                projectiles.forEach(p => p.draw());
+                particles.forEach(p => p.draw());
+                
+                updateUI();
+                
+                // State checks
+                checkGameOver();
+                checkVictory();
+
+            } else if (gameState === 'menu') {
+                // Draw menu state (handled by HTML overlay)
+            } else if (gameState === 'gameover') {
+                // Draw game over state (handled by HTML overlay)
+            } else if (gameState === 'victory') {
+                // Draw victory state (handled by HTML overlay)
+            }
+
+            // Apply shake transformation
+            ctx.save();
+            ctx.translate(shakeX, shakeY);
+            
+            // Request next frame
+            gameLoopId = requestAnimationFrame(gameLoop);
+            ctx.restore();
+        };
+
+
+        // Start the game
+        initialize();
+
+    </script>
+</body>
+</html>

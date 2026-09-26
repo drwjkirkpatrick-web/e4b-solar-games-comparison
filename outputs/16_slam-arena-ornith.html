@@ -1,0 +1,778 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>SLAM ARENA - 1989 Retro Wrestling</title>
+    <style>
+        body {
+            background-color: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            margin: 0;
+            font-family: 'Courier New', monospace;
+            color: #fff;
+            overflow: hidden;
+        }
+        canvas {
+            border: 4px solid #ff006e;
+            box-shadow: 0 0 20px #ff006e, inset 0 0 10px #ff006e;
+            background-color: #000;
+        }
+    </style>
+</head>
+<body>
+    <canvas id="gameCanvas" width="800" height="500"></canvas>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+
+        // --- CONFIG & CONSTANTS ---
+        const WIDTH = canvas.width;
+        const HEIGHT = canvas.height;
+        const PIXEL_SCALE = 4; // For chunky, pixelated look
+        const GRAVITY = 0.8;
+        const GROUND_Y = HEIGHT - 100;
+        const WRESTLER_WIDTH = 48;
+        const WRESTLER_HEIGHT = 100;
+
+        // Neon Palette
+        const COLOR = {
+            BG: '#000000',
+            RING_BLUE: '#0044ff',
+            NEON_PINK: '#ff006e',
+            NEON_CYAN: '#00f5ff',
+            NEON_PURPLE: '#8338ec',
+            NEON_YELLOW: '#ffbe0b',
+            TEXT_GOLD: '#ffd700',
+            HIT_SPARK: '#ffffff',
+            FINISHER_FLASH: 'rgba(255, 255, 255, 0.8)'
+        };
+
+        // Game States
+        const GAME_STATE = {
+            MENU: 'menu',
+            PLAY: 'playing',
+            GAMEOVER: 'gameover'
+        };
+
+        // Input Mapping
+        const INPUT = {
+            A: false, D: false, W: false, S: false, J: false, K: false, SPACE: false, ENTER: false, M: false
+        };
+
+        // --- SOUND MANAGER (Web Audio API) ---
+        class SoundManager {
+            constructor() {
+                this.audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                this.isMuted = false;
+            }
+
+            playTone(frequency, duration, type = 'sine', volume = 0.1) {
+                if (this.isMuted) return;
+                const oscillator = this.audioContext.createOscillator();
+                const gainNode = this.audioContext.createGain();
+
+                oscillator.type = type;
+                oscillator.frequency.setValueAtTime(frequency, this.audioContext.currentTime);
+                gainNode.gain.setValueAtTime(volume, this.audioContext.currentTime);
+
+                oscillator.connect(gainNode);
+                gainNode.connect(this.audioContext.destination);
+
+                oscillator.start();
+                oscillator.stop(this.audioContext.currentTime + duration);
+            }
+
+            playHit() {
+                this.playTone(440, 0.05, 'square', 0.2);
+            }
+
+            playPunch() {
+                this.playTone(600, 0.05, 'square', 0.25);
+            }
+
+            playKick() {
+                this.playTone(300, 0.08, 'sawtooth', 0.3);
+            }
+
+            playSlam() {
+                this.playTone(50, 0.5, 'sawtooth', 0.5);
+            }
+
+            playBell() {
+                this.playTone(120, 0.3, 'square', 0.4);
+            }
+
+            playFinisher() {
+                this.playTone(10, 1.0, 'sawtooth', 0.8);
+            }
+
+            toggleMute() {
+                this.isMuted = !this.isMuted;
+                console.log("Mute Toggled:", this.isMuted);
+            }
+        }
+
+        const sound = new SoundManager();
+
+        // --- WRESTLER CLASS ---
+        class Wrestler {
+            constructor(name, x, isPlayer) {
+                this.name = name;
+                this.x = x;
+                this.y = GROUND_Y - WRESTLER_HEIGHT;
+                this.isPlayer = isPlayer;
+                this.hp = 100;
+                this.maxHp = 100;
+                this.energy = 0;
+                this.maxEnergy = 100;
+                this.isStunned = false;
+                this.stunTimer = 0;
+                this.isBlocking = false;
+                this.isGrappling = false;
+                this.isFinishing = false;
+                this.state = 'idle'; // idle, walking, attacking, blocking, stunned, grappling
+                this.facing = isPlayer ? 1 : -1; // 1=right, -1=left
+                this.speed = 4;
+                this.attackCooldown = 0;
+                this.lastAttackTime = 0;
+                this.currentAction = null; // e.g., 'punch', 'kick', 'slam'
+                this.frame = 0;
+                this.animationTimer = 0;
+            }
+
+            update(deltaTime, opponent) {
+                if (this.isStunned) {
+                    this.stunTimer -= deltaTime;
+                    if (this.stunTimer <= 0) {
+                        this.isStunned = false;
+                        this.state = 'idle';
+                    }
+                    return;
+                }
+
+                // Handle Grapple timing
+                if (this.isGrappling) {
+                    this.animationTimer += deltaTime;
+                    if (this.animationTimer > 1000) { // 1 second grapple duration
+                        this.isGrappling = false;
+                        this.state = 'idle';
+                        this.currentAction = null;
+                    }
+                    return;
+                }
+
+                // Handle Action Cooldown
+                if (this.attackCooldown > 0) {
+                    this.attackCooldown -= deltaTime;
+                }
+
+                // Handle Movement and AI Logic
+                if (this.isPlayer) {
+                    this.handlePlayerInput();
+                } else {
+                    this.handleCPU(opponent);
+                }
+
+                // Apply movement
+                if (this.state === 'walking') {
+                    this.x += this.facing * this.speed * (deltaTime / 16.67);
+                } else if (this.state === 'idle' && this.currentAction === null) {
+                    // Simple auto-approach if close
+                    const dist = Math.abs(this.x - opponent.x);
+                    if (dist > 150) {
+                        this.state = 'walking';
+                    } else {
+                        this.state = 'idle';
+                    }
+                }
+
+                // Keep wrestler on ground
+                if (this.y > GROUND_Y - WRESTLER_HEIGHT) {
+                    this.y = GROUND_Y - WRESTLER_HEIGHT;
+                }
+
+                // Update animation frame
+                this.frame = (this.frame + 1) % 4;
+                this.animationTimer += deltaTime;
+            }
+
+            handlePlayerInput() {
+                const dt = 16.67; // Simplified delta time for input checks
+
+                // Movement
+                if (INPUT.A) { this.x -= this.speed * (dt / 16.67); this.facing = -1; this.state = 'walking'; }
+                if (INPUT.D) { this.x += this.speed * (dt / 16.67); this.facing = 1; this.state = 'walking'; }
+                if (!INPUT.A && !INPUT.D && this.state !== 'attacking' && this.state !== 'grappling') {
+                    this.state = 'idle';
+                }
+
+                // Jump (W)
+                if (INPUT.W && this.state === 'idle') {
+                    // Simple jump implementation (not full physics, just state change)
+                    this.state = 'jumping';
+                    // In a full physics engine, we'd apply velocity here. For simplicity, we just change state.
+                }
+
+                // Block (S)
+                if (INPUT.S && this.state !== 'attacking' && this.state !== 'grappling') {
+                    this.isBlocking = true;
+                    this.state = 'blocking';
+                } else if (!INPUT.S) {
+                    this.isBlocking = false;
+                }
+
+                // Strikes (J/K)
+                if (INPUT.J && this.attackCooldown <= 0 && this.state === 'idle') {
+                    this.currentAction = 'punch';
+                    this.state = 'attacking';
+                    this.attackCooldown = 30; // 30 frames
+                    sound.playPunch();
+                }
+                if (INPUT.K && this.attackCooldown <= 0 && this.state === 'idle') {
+                    this.currentAction = 'kick';
+                    this.state = 'attacking';
+                    this.attackCooldown = 50; // 50 frames
+                    sound.playKick();
+                }
+
+                // Grapple (SPACE)
+                if (INPUT.SPACE && Math.abs(this.x - (this.isPlayer ? opponent.x : this.x)) < WRESTLER_WIDTH + 20) {
+                    if (this.state === 'idle') {
+                        this.isGrappling = true;
+                        this.state = 'grappling';
+                        this.currentAction = 'grab';
+                        sound.playTone(200, 0.1, 'square', 0.3);
+                    }
+                }
+
+                // Finisher (ENTER)
+                if (INPUT.ENTER && this.energy >= 100 && this.state === 'idle') {
+                    this.currentAction = 'slam';
+                    this.state = 'finishing';
+                    this.isFinishing = true;
+                    this.energy = 0;
+                    sound.playFinisher();
+                }
+            }
+
+            handleCPU(opponent) {
+                const dist = Math.abs(this.x - opponent.x);
+                const dt = 16.67;
+
+                // Simple State Machine for CPU
+                if (this.state === 'approach') {
+                    if (dist > 150) {
+                        this.x += this.facing * this.speed * (dt / 16.67);
+                    } else {
+                        this.state = 'strike';
+                    }
+                } else if (this.state === 'strike') {
+                    if (dist < 70) {
+                        // 30% chance to strike
+                        if (Math.random() < 0.3) {
+                            this.currentAction = Math.random() < 0.5 ? 'punch' : 'kick';
+                            this.state = 'attacking';
+                            this.attackCooldown = this.currentAction === 'punch' ? 30 : 50;
+                            sound.play(this.currentAction === 'punch' ? 'punch' : 'kick');
+                        } else {
+                            this.state = 'retreat';
+                        }
+                    } else {
+                        this.state = 'approach';
+                    }
+                } else if (this.state === 'retreat') {
+                    this.x -= this.facing * 20;
+                    if (Math.abs(this.x - opponent.x) < 150) {
+                        this.state = 'approach';
+                    }
+                }
+
+                // Default movement if not in a specific state
+                if (this.state === 'idle') {
+                    if (dist > 150) {
+                        this.state = 'approach';
+                    }
+                }
+            }
+
+            takeDamage(damage) {
+                if (this.isStunned || this.isFinishing) return;
+
+                this.hp -= damage;
+                sound.playHit();
+                this.state = 'stunned';
+                this.stunTimer = 3000; // 3 seconds stun
+
+                if (this.hp <= 0) {
+                    this.hp = 0;
+                    this.state = 'defeated';
+                    sound.playBell();
+                }
+            }
+        }
+
+        // --- GAME MANAGER ---
+        let gameState = GAME_STATE.MENU;
+        let player, cpu;
+        let round = 1;
+        let falls = 0;
+        let roundTimer = 99;
+        let timerInterval;
+        let screenShake = 0;
+        let particles = [];
+
+        function initGame() {
+            player = new Wrestler("HERO", 100, true);
+            cpu = new Wrestler("VILLAIN", 650, false);
+            round = 1;
+            falls = 0;
+            roundTimer = 99;
+            gameState = GAME_STATE.PLAY;
+            if (timerInterval) clearInterval(timerInterval);
+            timerInterval = setInterval(() => {
+                if (gameState === GAME_STATE.PLAY) {
+                    roundTimer--;
+                    if (roundTimer <= 0) {
+                        endRound();
+                    }
+                }
+            }, 1000);
+        }
+
+        function endRound() {
+            clearInterval(timerInterval);
+            if (player.hp > cpu.hp) {
+                round++;
+                falls++;
+                sound.playBell();
+                if (falls >= 2) {
+                    gameState = GAME_STATE.GAMEOVER;
+                    alert("VICTORY! You win the SLAM ARENA!");
+                    resetGame();
+                } else {
+                    startRound();
+                }
+            } else if (cpu.hp > player.hp) {
+                round++;
+                falls++;
+                sound.playBell();
+                if (falls >= 2) {
+                    gameState = GAME_STATE.GAMEOVER;
+                    alert("DEFEAT! The Villain wins the SLAM ARENA!");
+                    resetGame();
+                } else {
+                    startRound();
+                }
+            } else {
+                // Draw
+                startRound();
+            }
+        }
+
+        function startRound() {
+            roundTimer = 99;
+            player.isStunned = false;
+            cpu.isStunned = false;
+            player.state = 'idle';
+            cpu.state = 'approach';
+        }
+
+        function resetGame() {
+            player = new Wrestler("HERO", 100, true);
+            cpu = new Wrestler("VILLAIN", 650, false);
+            round = 1;
+            falls = 0;
+            gameState = GAME_STATE.MENU;
+        }
+
+        // --- COMBAT LOGIC ---
+        function checkHitbox(attacker, defender) {
+            if (attacker.state !== 'attacking' || attacker.currentAction === null) return false;
+
+            // Check proximity
+            const distance = Math.abs(attacker.x - defender.x);
+            if (distance > WRESTLER_WIDTH + 60) return false;
+
+            // Check facing direction
+            const facingMatch = (attacker.facing === 1 && defender.x > attacker.x) || (attacker.facing === -1 && defender.x < attacker.x);
+            if (!facingMatch) return false;
+
+            // Check block
+            if (defender.isBlocking) {
+                if (attacker.currentAction === 'punch') {
+                    // Block punch
+                    return false;
+                }
+            }
+
+            // Damage calculation
+            let damage = 0;
+            if (attacker.currentAction === 'punch') {
+                damage = 8;
+            } else if (attacker.currentAction === 'kick') {
+                damage = 15;
+            } else if (attacker.currentAction === 'slam') {
+                damage = 50;
+                triggerScreenShake(15);
+                triggerNeonFlash();
+            }
+
+            // Apply damage
+            defender.takeDamage(damage);
+            
+            // Energy gain
+            if (damage > 0) {
+                attacker.energy = Math.min(attacker.maxEnergy, attacker.energy + 10);
+            }
+
+            return true;
+        }
+
+        function triggerScreenShake(intensity) {
+            screenShake = intensity;
+        }
+
+        function triggerNeonFlash() {
+            // This will be handled by the draw loop by setting a global flash state
+            window.flashActive = true;
+            setTimeout(() => { window.flashActive = false; }, 100);
+        }
+
+        // --- PARTICLE SYSTEM ---
+        class Particle {
+            constructor(x, y, color) {
+                this.x = x;
+                this.y = y;
+                this.vx = (Math.random() - 0.5) * 5;
+                this.vy = (Math.random() - 0.5) * 5;
+                this.life = 1.0;
+                this.color = color;
+            }
+
+            update() {
+                this.x += this.vx;
+                this.y += this.vy;
+                this.vy += 0.1; // Gravity
+                this.life -= 0.02;
+            }
+
+            draw() {
+                ctx.fillStyle = `rgba(255, 255, 255, ${this.life})`;
+                ctx.fillRect(this.x, this.y, 2, 2);
+            }
+        }
+
+        function spawnParticles(x, y) {
+            for (let i = 0; i < 10; i++) {
+                particles.push(new Particle(x, y, COLOR.HIT_SPARK));
+            }
+        }
+
+        // --- DRAWING FUNCTIONS ---
+
+        function drawRing() {
+            // Ring Canvas (Blue)
+            ctx.fillStyle = COLOR.RING_BLUE;
+            ctx.fillRect(0, GROUND_Y, WIDTH, HEIGHT - GROUND_Y);
+
+            // Ropes (Neon Lines)
+            ctx.strokeStyle = COLOR.NEON_CYAN;
+            ctx.lineWidth = 4;
+            const ropeY1 = GROUND_Y - 50;
+            const ropeY2 = GROUND_Y - 150;
+            const ropeY3 = GROUND_Y - 250;
+
+            // Top rope
+            ctx.beginPath();
+            ctx.moveTo(0, ropeY1);
+            ctx.lineTo(WIDTH, ropeY1);
+            ctx.stroke();
+
+            // Middle rope
+            ctx.beginPath();
+            ctx.moveTo(0, ropeY2);
+            ctx.lineTo(WIDTH, ropeY2);
+            ctx.stroke();
+
+            // Bottom rope
+            ctx.beginPath();
+            ctx.moveTo(0, ropeY3);
+            ctx.lineTo(WIDTH, ropeY3);
+            ctx.stroke();
+
+            // Turnbuckles (Neon Lights)
+            ctx.fillStyle = COLOR.NEON_PINK;
+            ctx.fillRect(0, GROUND_Y - 10, 10, 10); // Left corner
+            ctx.fillRect(WIDTH - 10, GROUND_Y - 10, 10, 10); // Right corner
+        }
+
+        function drawWrestler(w, offsetX, offsetY) {
+            ctx.save();
+            ctx.translate(w.x + offsetX, w.y + offsetY);
+
+            // Base Body (Spandex)
+            ctx.fillStyle = w.isPlayer ? COLOR.NEON_PINK : COLOR.NEON_PURPLE;
+            ctx.fillRect(0, 0, WRESTLER_WIDTH, WRESTLER_HEIGHT);
+
+            // Muscle/Outline (Black/Cyan)
+            ctx.strokeStyle = COLOR.NEON_CYAN;
+            ctx.lineWidth = 3;
+            ctx.strokeRect(0, 0, WRESTLER_WIDTH, WRESTLER_HEIGHT);
+
+            // Head (Simple circle/block)
+            ctx.fillStyle = '#ffdbac'; // Skin tone
+            ctx.fillRect(WRESTLER_WIDTH / 4, -20, WRESTLER_WIDTH / 2, 20);
+
+            // Headband (Neon)
+            ctx.fillStyle = COLOR.NEON_YELLOW;
+            ctx.fillRect(WRESTLER_WIDTH / 4 - 5, -25, WRESTLER_WIDTH / 2 + 10, 5);
+
+            // Pose/Action Drawing (Simplified)
+            let armX = 0;
+            let armY = 10;
+            let legX = 0;
+            let legY = 50;
+
+            if (w.state === 'idle' || w.state === 'walking') {
+                // Idle pose
+                ctx.fillStyle = COLOR.NEON_CYAN;
+                ctx.fillRect(armX, armY, 10, 40); // Arm
+                ctx.fillRect(legX, legY, 15, 50); // Leg
+            } else if (w.state === 'attacking') {
+                // Attack pose (punch/kick)
+                ctx.fillStyle = COLOR.NEON_YELLOW;
+                if (w.currentAction === 'punch') {
+                    ctx.fillRect(WRESTLER_WIDTH, armY, 30, 10); // Punch
+                } else if (w.currentAction === 'kick') {
+                    ctx.fillRect(WRESTLER_WIDTH + 10, legY, 30, 10); // Kick
+                }
+            } else if (w.state === 'grappling') {
+                // Grapple pose (hug)
+                ctx.fillStyle = COLOR.NEON_PINK;
+                ctx.fillRect(WRESTLER_WIDTH - 10, 10, 30, 30);
+            } else if (w.state === 'finishing') {
+                // Slam pose (overhead)
+                ctx.fillStyle = COLOR.NEON_CYAN;
+                ctx.fillRect(WRESTLER_WIDTH / 2 - 10, -50, 30, 50);
+            } else if (w.state === 'stunned') {
+                 // Stunned pose (shaking)
+                 ctx.fillStyle = 'red';
+                 ctx.fillRect(WRESTLER_WIDTH / 4, 0, 20, 50);
+            }
+
+            ctx.restore();
+        }
+
+        function drawUI() {
+            // Health Bars
+            const drawHealth = (w, xOffset) => {
+                const barWidth = 200;
+                const barHeight = 20;
+                const hpRatio = w.hp / w.maxHp;
+                const x = xOffset;
+                const y = 20;
+
+                // Background
+                ctx.fillStyle = '#330000';
+                ctx.fillRect(x, y, barWidth, barHeight);
+
+                // Health Fill (Neon Green/Red)
+                ctx.fillStyle = hpRatio > 0.5 ? COLOR.NEON_CYAN : COLOR.NEON_PINK;
+                ctx.fillRect(x, y, barWidth * hpRatio, barHeight);
+
+                // Outline
+                ctx.strokeStyle = COLOR.NEON_YELLOW;
+                ctx.lineWidth = 2;
+                ctx.strokeRect(x, y, barWidth, barHeight);
+
+                // Text
+                ctx.fillStyle = COLOR.NEON_YELLOW;
+                ctx.font = "16px 'Courier New'";
+                ctx.fillText(`${w.name} (${w.hp} HP)`, x, y - 10);
+            };
+
+            drawHealth(player, 50);
+            drawHealth(cpu, WIDTH - 250);
+
+            // Energy Meter (Bottom)
+            const drawEnergy = (w, xOffset) => {
+                const barWidth = 200;
+                const barHeight = 10;
+                const energyRatio = w.energy / w.maxEnergy;
+                const x = xOffset;
+                const y = GROUND_Y + 20;
+
+                // Background
+                ctx.fillStyle = '#333';
+                ctx.fillRect(x, y, barWidth, barHeight);
+
+                // Energy Fill (Yellow -> Red)
+                ctx.fillStyle = energyRatio > 0.8 ? '#ff0000' : COLOR.NEON_YELLOW;
+                ctx.fillRect(x, y, barWidth * energyRatio, barHeight);
+
+                // Outline
+                ctx.strokeStyle = COLOR.NEON_CYAN;
+                ctx.lineWidth = 1;
+                ctx.strokeRect(x, y, barWidth, barHeight);
+
+                // Finisher Flash
+                if (w.energy >= 100) {
+                    ctx.fillStyle = COLOR.NEON_CYAN;
+                    ctx.font = "12px 'Courier New'";
+                    ctx.fillText("FINISHER READY!", x + 5, y + barHeight + 12);
+                }
+            };
+
+            drawEnergy(player, 50);
+            drawEnergy(cpu, WIDTH - 250);
+
+            // Round/Game Status
+            ctx.fillStyle = COLOR.NEON_CYAN;
+            ctx.font = "24px 'Courier New'";
+            ctx.fillText(`ROUND ${round}`, 400, 40);
+            ctx.fillText(`TIME: ${roundTimer}`, 400, 70);
+
+            if (gameState === GAME_STATE.MENU) {
+                ctx.fillStyle = COLOR.NEON_PINK;
+                ctx.font = "60px 'Courier New'";
+                ctx.textAlign = "center";
+                ctx.fillText("SLAM ARENA", WIDTH / 2, HEIGHT / 3);
+                ctx.fillStyle = COLOR.NEON_CYAN;
+                ctx.font = "20px 'Courier New'";
+                ctx.fillText("PRESS SPACE TO FIGHT!", WIDTH / 2, HEIGHT / 3 + 60);
+                ctx.fillStyle = '#fff';
+                ctx.font = "14px 'Courier New'";
+                ctx.fillText("Controls: A/D (Move), W (Jump), S (Block), J (Punch), K (Kick), SPACE (Grab), ENTER (Finisher), M (Mute)", WIDTH / 2, HEIGHT / 3 + 100);
+                ctx.textAlign = "left";
+            }
+
+            if (gameState === GAME_STATE.GAMEOVER) {
+                ctx.fillStyle = COLOR.TEXT_GOLD;
+                ctx.font = "80px 'Courier New'";
+                ctx.textAlign = "center";
+                ctx.fillText("VICTORY!", WIDTH / 2, HEIGHT / 2 - 50);
+                ctx.fillStyle = COLOR.NEON_CYAN;
+                ctx.font = "30px 'Courier New'";
+                ctx.fillText("Press Space to Rematch", WIDTH / 2, HEIGHT / 2 + 50);
+                ctx.textAlign = "left";
+            }
+        }
+
+        function drawParticles() {
+            for (let i = particles.length - 1; i >= 0; i--) {
+                const p = particles[i];
+                p.update();
+                p.draw();
+                if (p.life <= 0) {
+                    particles.splice(i, 1);
+                }
+            }
+        }
+
+        // --- MAIN LOOP ---
+        let lastTime = 0;
+        function gameLoop(timestamp) {
+            const deltaTime = timestamp - lastTime;
+            lastTime = timestamp;
+
+            // 1. Clear Canvas
+            ctx.fillStyle = COLOR.BG;
+            ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+            // 2. Handle Screen Shake
+            const shakeX = screenShake * (Math.random() - 0.5);
+            const shakeY = screenShake * (Math.random() - 0.5);
+            ctx.save();
+            ctx.translate(shakeX, shakeY);
+
+            // 3. Update Game State
+            if (gameState === GAME_STATE.PLAY) {
+                // Update Wrestlers
+                player.update(deltaTime, cpu);
+                cpu.update(deltaTime, player);
+
+                // Combat Check (Player attacks CPU)
+                if (player.state === 'attacking') {
+                    checkHitbox(player, cpu);
+                }
+
+                // Combat Check (CPU attacks Player)
+                if (cpu.state === 'attacking') {
+                    checkHitbox(cpu, player);
+                }
+
+                // Pin Check (Walk close + Space)
+                const closeEnough = Math.abs(player.x - cpu.x) < WRESTLER_WIDTH + 20;
+                if (closeEnough && INPUT.SPACE && player.state === 'idle' && cpu.state === 'idle') {
+                    // Pin sequence
+                    if (player.isPlayer) {
+                        // Simple pin logic: 1, 2, 3 count
+                        const pinCount = Math.floor(Date.now() / 1000) % 4;
+                        if (pinCount === 0) {
+                            cpu.hp = 0;
+                            player.state = 'idle';
+                            cpu.state = 'defeated';
+                            // Pin successful
+                            endRound();
+                        }
+                    }
+                }
+            }
+
+            // 4. Draw Elements
+            drawRing();
+            drawWrestler(player, 0, 0);
+            drawWrestler(cpu, 0, 0);
+            drawParticles();
+            drawUI();
+
+            // 5. Restore Context
+            ctx.restore();
+
+            requestAnimationFrame(gameLoop);
+        }
+
+        // --- EVENT LISTENERS ---
+        window.addEventListener('keydown', (e) => {
+            const key = e.key.toUpperCase();
+            if (key === 'A') INPUT.A = true;
+            if (key === 'D') INPUT.D = true;
+            if (key === 'W') INPUT.W = true;
+            if (key === 'S') INPUT.S = true;
+            if (key === 'J') INPUT.J = true;
+            if (key === 'K') INPUT.K = true;
+            if (key === 'SPACE') INPUT.SPACE = true;
+            if (key === 'ENTER') INPUT.ENTER = true;
+            if (key === 'M') {
+                sound.toggleMute();
+            }
+
+            if (gameState === GAME_STATE.MENU && key === ' ') {
+                e.preventDefault();
+                initGame();
+            }
+        });
+
+        window.addEventListener('keyup', (e) => {
+            const key = e.key.toUpperCase();
+            if (key === 'A') INPUT.A = false;
+            if (key === 'D') INPUT.D = false;
+            if (key === 'W') INPUT.W = false;
+            if (key === 'S') INPUT.S = false;
+            if (key === 'J') INPUT.J = false;
+            if (key === 'K') INPUT.K = false;
+            if (key === 'SPACE') INPUT.SPACE = false;
+            if (key === 'ENTER') INPUT.ENTER = false;
+        });
+
+        // Start the game loop
+        requestAnimationFrame(gameLoop);
+
+    </script>
+</body>
+</html>

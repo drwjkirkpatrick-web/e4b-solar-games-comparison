@@ -1,0 +1,970 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+    <title>JUNGLE SWING: JANE'S ADVENTURE</title>
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            background-color: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+            font-family: 'Courier New', monospace;
+            image-rendering: pixelated;
+        }
+        #game-container {
+            position: relative;
+            box-shadow: 0 0 20px rgba(0, 0, 0, 0.5);
+            border: 4px solid #1a3a1a;
+        }
+        canvas {
+            display: block;
+            background-color: #224422; /* Base jungle color */
+        }
+        /* CRT Overlay */
+        #game-container::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            pointer-events: none;
+            background: repeating-linear-gradient(
+                0deg,
+                rgba(0, 0, 0, 0.05),
+                rgba(0, 0, 0, 0.05) 1px,
+                transparent 1px,
+                transparent 2px
+            );
+            opacity: 0.6;
+        }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <canvas id="gameCanvas"></canvas>
+</div>
+
+<script>
+/**
+ * JUNGLE SWING: JANE'S ADVENTURE
+ * Expert HTML5 Game Development using Canvas and Web Audio API.
+ */
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+
+// Game Constants
+const GAME_WIDTH = 800;
+const GAME_HEIGHT = 450;
+canvas.width = GAME_WIDTH;
+canvas.height = GAME_HEIGHT;
+
+const GRAVITY = 0.5;
+const JANE_SPEED = 5;
+const SWING_DAMP = 0.99;
+const SCROLL_SPEED_BASE = 2;
+const SCROLL_SPEED_INCREMENT = 0.001;
+
+// Game State
+let gameState = 'TITLE'; // TITLE, PLAYING, PAUSED, GAMEOVER
+let score = 0;
+let multiplier = 1;
+let distance = 0;
+let lives = 3;
+let hp = 3;
+let lastTime = 0;
+let scrollSpeed = SCROLL_SPEED_BASE;
+let shakeIntensity = 0;
+let shakeTimer = 0;
+
+// Game Objects
+let player;
+let vines = [];
+let platforms = [];
+let collectibles = [];
+let hazards = [];
+let enemies = [];
+
+// Input
+const keys = {};
+const touchState = { left: false, right: false };
+
+// --- AUDIO ENGINE ---
+const AudioContext = window.AudioContext || window.webkitAudioContext;
+let audioCtx;
+let isMuted = false;
+
+function initAudio() {
+    if (audioCtx) return;
+    audioCtx = new AudioContext();
+}
+
+function playSound(type, duration = 0.1) {
+    if (isMuted || !audioCtx) return;
+
+    const osc = audioCtx.createOscillator();
+    const gainNode = audioCtx.createGain();
+
+    switch (type) {
+        case 'whoosh': // Vine grab
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(200, audioCtx.currentTime);
+            gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValue(0.001, audioCtx.currentTime + duration);
+            break;
+        case 'creak': // Swing creak
+            osc.type = 'sawtooth';
+            osc.frequency.setValueAtTime(150, audioCtx.currentTime);
+            gainNode.gain.setValueAtTime(0.1, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValue(0.001, audioCtx.currentTime + duration);
+            break;
+        case 'launch': // Release launch
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(440, audioCtx.currentTime);
+            gainNode.gain.setValueAtTime(0.4, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValue(1200, audioCtx.currentTime + duration);
+            gainNode.gain.exponentialRampToValue(0.001, audioCtx.currentTime + duration);
+            break;
+        case 'gem': // Collect
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(880, audioCtx.currentTime);
+            gainNode.gain.setValueAtTime(0.2, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValue(0.001, audioCtx.currentTime + duration);
+            break;
+        case 'fruit': // Heal
+            osc.type = 'sine';
+            osc.frequency.setValueAtTime(300, audioCtx.currentTime);
+            gainNode.gain.setValueAtTime(0.3, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValue(0.001, audioCtx.currentTime + duration);
+            break;
+        case 'thud': // Damage
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(80, audioCtx.currentTime);
+            gainNode.gain.setValueAtTime(0.5, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValue(0.001, audioCtx.currentTime + duration);
+            break;
+        case 'splash': // Water hit
+            // Noise burst
+            const buffer = audioCtx.createBuffer(1, audioCtx.sampleRate * 0.2, audioCtx.sampleRate);
+            const data = buffer.getChannelData(0);
+            for (let i = 0; i < data.length; i++) {
+                data[i] = Math.random() * 2 - 1;
+            }
+            const source = audioCtx.createBufferSource();
+            source.buffer = buffer;
+            const gain = audioCtx.createGain();
+            gain.gain.setValueAtTime(0.5, audioCtx.currentTime);
+            gain.gain.exponentialRampToValue(0.001, audioCtx.currentTime + 0.2);
+            source.connect(gain);
+            gain.connect(audioCtx.destination);
+            source.start();
+            break;
+        case 'bonk': // Monkey coconut
+            osc.type = 'square';
+            osc.frequency.setValueAtTime(100, audioCtx.currentTime);
+            gainNode.gain.setValueAtTime(0.4, audioCtx.currentTime);
+            gainNode.gain.exponentialRampToValue(0.001, audioCtx.currentTime + duration);
+            break;
+        case 'level': // Fanfare
+            osc.type = 'triangle';
+            osc.frequency.setValueAtTime(200, audioCtx.currentTime);
+            gainNode.gain.setValueAtTime(0.5, audioCtx.currentTime);
+            osc.frequency.exponentialRampToValue(800, audioCtx.currentTime + 0.5);
+            gainNode.gain.exponentialRampToValue(0.001, audioCtx.currentTime + 0.5);
+            break;
+    }
+
+    osc.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+    osc.start(audioCtx.currentTime);
+    osc.stop(audioCtx.currentTime + duration);
+}
+
+// --- CLASSES ---
+
+class Player {
+    constructor() {
+        this.width = 20;
+        this.height = 30;
+        this.x = 50;
+        this.y = GAME_HEIGHT - 60;
+        this.vx = 0;
+        this.vy = 0;
+        this.isSwinging = false;
+        this.swingAnchor = null;
+        this.swingAngle = 0;
+        this.swingAngularVelocity = 0;
+        this.onGround = false;
+        this.isJumping = false;
+    }
+
+    update(dt) {
+        if (this.isSwinging && this.swingAnchor) {
+            // Pendulum Physics
+            const dx = this.x - this.swingAnchor.x;
+            const dy = this.y - this.swingAnchor.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
+            const R = this.swingAnchor.radius;
+
+            // Calculate current angle based on position
+            this.swingAngle = Math.atan2(dy, dx);
+
+            // Apply angular velocity
+            this.swingAngularVelocity += (keys['ArrowLeft'] || keys['a'] ? -0.02 : (keys['ArrowRight'] || keys['d'] ? 0.02 : 0));
+            
+            // Apply damping
+            this.swingAngularVelocity *= SWING_DAMP;
+
+            // Update position based on angle and velocity
+            this.x = this.swingAnchor.x + R * Math.sin(this.swingAngle);
+            this.y = this.swingAnchor.y + R * Math.cos(this.swingAngle);
+
+            // Apply gravity effect (simulated by angular acceleration)
+            // Note: In a true pendulum, gravity dictates the path. Here we use velocity control.
+            // We keep the velocity control simple for a "pumping" feel.
+
+        } else {
+            // Freefall / Running Physics
+            if (this.onGround) {
+                this.vy = 0;
+                this.y = Math.max(this.y, GAME_HEIGHT - 50 - this.height); // Ground collision
+                this.onGround = true;
+            } else {
+                this.vy += GRAVITY;
+                this.y += this.vy;
+                this.onGround = false;
+            }
+
+            // Horizontal movement (running)
+            if (keys['ArrowLeft'] || keys['a']) {
+                this.vx = -JANE_SPEED;
+            } else if (keys['ArrowRight'] || keys['d']) {
+                this.vx = JANE_SPEED;
+            } else {
+                this.vx *= 0.8; // Friction
+            }
+            this.x += this.vx;
+        }
+
+        // Boundary checks
+        if (this.x < 0) this.x = 0;
+        if (this.x > GAME_WIDTH - this.width) this.x = GAME_WIDTH - this.width;
+
+        // Check if falling into the pit
+        if (this.y > GAME_HEIGHT + 50) {
+            this.die();
+        }
+    }
+
+    // Attempts to grab a vine
+    grabVine(vine) {
+        if (this.isSwinging) return;
+
+        const dx = vine.x - this.x;
+        const dy = vine.y - this.y;
+        const distanceSq = dx * dx + dy * dy;
+
+        if (distanceSq < 40 * 40) { // Proximity check
+            this.isSwinging = true;
+            this.swingAnchor = vine;
+            this.swingAngle = Math.atan2(dy, dx);
+            this.swingAngularVelocity = 0;
+            
+            // Apply initial velocity based on current movement direction
+            this.vx = (this.vx > 0 ? 1 : -1) * 5; 
+            
+            playSound('whoosh');
+        }
+    }
+
+    // Releases the swing
+    releaseSwing() {
+        if (this.isSwinging) {
+            this.isSwinging = false;
+            this.swingAnchor = null;
+            
+            // Calculate release velocity (tangential to the arc)
+            const R = this.swingAnchor.radius;
+            const angle = this.swingAngle;
+            
+            // Velocity components
+            this.vx = R * this.swingAngularVelocity * Math.cos(angle);
+            this.vy = R * this.swingAngularVelocity * Math.sin(angle);
+            
+            playSound('launch');
+        }
+    }
+
+    die() {
+        lives--;
+        if (lives <= 0) {
+            gameState = 'GAMEOVER';
+        } else {
+            resetPlayerPosition();
+            // Brief invulnerability/reset state
+            setTimeout(() => {
+                if (gameState === 'PLAYING') {
+                    resetPlayerPosition();
+                }
+            }, 1500);
+        }
+    }
+
+    resetPlayerPosition() {
+        this.x = 50;
+        this.y = GAME_HEIGHT - 60;
+        this.vx = 0;
+        this.vy = 0;
+        this.isSwinging = false;
+        this.onGround = true;
+        this.isJumping = false;
+    }
+
+    draw(ctx) {
+        ctx.save();
+        
+        // Simple 16-bit character representation
+        ctx.fillStyle = '#008000'; // Green outfit
+        ctx.fillRect(this.x, this.y, this.width, this.height);
+        
+        // Ponytail/Head
+        ctx.fillStyle = '#8B4513'; // Brown
+        ctx.fillRect(this.x + 5, this.y - 5, 10, 10);
+
+        // Draw swing line if applicable
+        if (this.isSwinging && this.swingAnchor) {
+            ctx.strokeStyle = '#4B2A00';
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.moveTo(this.swingAnchor.x, this.swingAnchor.y);
+            ctx.lineTo(this.x, this.y);
+            ctx.stroke();
+        }
+
+        ctx.restore();
+    }
+}
+
+class Vine {
+    constructor(x, y, length) {
+        this.x = x;
+        this.y = y; // Anchor point
+        this.length = length;
+        this.width = 4;
+        this.grabRadius = 20;
+    }
+
+    update() {
+        // Vines are static
+    }
+
+    draw(ctx) {
+        ctx.strokeStyle = '#4B2A00';
+        ctx.lineWidth = this.width;
+        ctx.beginPath();
+        ctx.moveTo(this.x, this.y);
+        // Draw a wavy line to simulate nature
+        ctx.bezierCurveTo(
+            this.x + 10, this.y + this.length * 0.3,
+            this.x - 10, this.y + this.length * 0.7,
+            this.x, this.y + this.length
+        );
+        ctx.stroke();
+    }
+}
+
+class Platform {
+    constructor(x, y, w, h) {
+        this.x = x;
+        this.y = y;
+        this.width = w;
+        this.height = h;
+    }
+
+    update() {
+        // Platforms scroll with the world
+    }
+
+    draw(ctx) {
+        // 16-bit rock/log style
+        ctx.fillStyle = '#6B4226'; // Brown wood/rock
+        ctx.fillRect(this.x, this.y, this.width, this.height);
+        
+        // Simple texture lines
+        ctx.strokeStyle = '#4B3018';
+        ctx.lineWidth = 1;
+        for (let i = 0; i < this.width; i += 10) {
+            ctx.beginPath();
+            ctx.moveTo(this.x + i, this.y);
+            ctx.lineTo(this.x + i, this.y + this.height);
+            ctx.stroke();
+        }
+    }
+}
+
+class Collectible {
+    constructor(x, y, type) {
+        this.x = x;
+        this.y = y;
+        this.type = type; // 'gold', 'red', 'fruit'
+        this.width = 10;
+        this.height = 10;
+    }
+
+    update() {
+        // Scrolls with world
+    }
+
+    draw(ctx) {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        
+        if (this.type === 'gold') {
+            ctx.fillStyle = '#FFD700'; // Gold
+            ctx.beginPath();
+            ctx.moveTo(0, -5);
+            ctx.lineTo(5, 0);
+            ctx.lineTo(0, 5);
+            ctx.lineTo(-5, 0);
+            ctx.closePath();
+            ctx.fill();
+        } else if (this.type === 'red') {
+            ctx.fillStyle = '#FF0000'; // Red
+            ctx.fillRect(-5, -5, 10, 10);
+        } else if (this.type === 'fruit') {
+            ctx.fillStyle = '#00FF00'; // Green fruit
+            ctx.beginPath();
+            ctx.arc(0, 0, 5, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        ctx.restore();
+    }
+}
+
+class Hazard {
+    constructor(x, y, type) {
+        this.x = x;
+        this.y = y;
+        this.type = type; // 'snake', 'spike', 'rock'
+        this.width = 15;
+        this.height = 15;
+    }
+
+    update() {
+        // Scrolls with world
+    }
+
+    draw(ctx) {
+        ctx.fillStyle = '#333';
+        if (this.type === 'snake') {
+            // Simple snake representation
+            ctx.beginPath();
+            ctx.arc(this.x + 5, this.y + 5, 5, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillRect(this.x, this.y + 5, 15, 5);
+        } else if (this.type === 'spike') {
+            // Spiked log in water
+            ctx.beginPath();
+            ctx.moveTo(this.x, this.y + this.height);
+            ctx.lineTo(this.x - 5, this.y);
+            ctx.lineTo(this.x + 5, this.y);
+            ctx.closePath();
+            ctx.fill();
+        } else if (this.type === 'rock') {
+            // Falling rock
+            ctx.fillStyle = '#808080';
+            ctx.fillRect(this.x, this.y, this.width, this.height);
+        }
+    }
+}
+
+class Enemy {
+    constructor(x, y, type) {
+        this.x = x;
+        this.y = y;
+        this.type = type; // 'monkey', 'toucan'
+        this.width = 20;
+        this.height = 20;
+        this.vx = 0;
+        this.vy = 0;
+        this.health = 1;
+    }
+
+    update() {
+        if (this.type === 'monkey') {
+            // Monkey throws coconuts randomly
+            if (Math.random() < 0.005) {
+                this.throwCoconut();
+            }
+        } else if (this.type === 'toucan') {
+            // Flying toucan dive bomb
+            this.vy += 0.1;
+            this.y += this.vy;
+        }
+    }
+
+    throwCoconut() {
+        // Coconut projectile
+        const coconut = {
+            x: this.x + this.width,
+            y: this.y + this.height / 2,
+            vx: 4,
+            vy: 0,
+            width: 8,
+            height: 8
+        };
+        hazards.push(coconut); // Reusing hazards array for projectiles
+    }
+
+    draw(ctx) {
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        
+        if (this.type === 'monkey') {
+            ctx.fillStyle = '#A0522D'; // Brown monkey
+            ctx.fillRect(0, 0, this.width, this.height);
+            ctx.fillStyle = '#FFD700'; // Banana/Face
+            ctx.fillRect(5, 5, 10, 10);
+        } else if (this.type === 'toucan') {
+            ctx.fillStyle = '#FF0000'; // Red beak
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(10, 0);
+            ctx.lineTo(5, -5);
+            ctx.fill();
+            ctx.fillStyle = '#000000'; // Black body
+            ctx.fillRect(0, 0, this.width, this.height);
+        }
+        ctx.restore();
+    }
+}
+
+// --- WORLD GENERATION AND MANAGEMENT ---
+
+function generateWorld() {
+    // Clear existing elements
+    vines = [];
+    platforms = [];
+    collectibles = [];
+    hazards = [];
+    enemies = [];
+
+    // Initial ground platform
+    platforms.push(new Platform(0, GAME_HEIGHT - 50, GAME_WIDTH * 2, 50));
+
+    // Procedural generation loop (Generates chunks ahead of the player)
+    for (let i = 0; i < 15; i++) {
+        const startX = i * 250;
+        const endX = startX + 250;
+
+        // 1. Platforms
+        const numPlatforms = Math.floor(Math.random() * 3) + 1;
+        for (let j = 0; j < numPlatforms; j++) {
+            const x = startX + Math.random() * (endX - startX);
+            const y = GAME_HEIGHT - 150 - Math.random() * 100;
+            const w = 80 + Math.random() * 120;
+            const h = 20 + Math.random() * 10;
+            platforms.push(new Platform(x, y, w, h));
+        }
+
+        // 2. Vines
+        const numVines = Math.floor(Math.random() * 4) + 2;
+        for (let j = 0; j < numVines; j++) {
+            const x = startX + Math.random() * (endX - startX);
+            const y = 0; // Anchor at canopy
+            const length = 150 + Math.random() * 150;
+            vines.push(new Vine(x, y, length));
+        }
+
+        // 3. Collectibles
+        if (Math.random() < 0.5) {
+            const x = startX + Math.random() * (endX - startX);
+            const y = GAME_HEIGHT - 200 - Math.random() * 50;
+            const type = Math.random() < 0.1 ? 'fruit' : (Math.random() < 0.3 ? 'red' : 'gold');
+            collectibles.push(new Collectible(x, y, type));
+        }
+
+        // 4. Hazards
+        if (Math.random() < 0.3) {
+            const x = startX + Math.random() * (endX - startX);
+            const y = GAME_HEIGHT - 100;
+            const type = Math.random() < 0.5 ? 'snake' : 'spike';
+            hazards.push(new Hazard(x, y, type));
+        }
+        
+        // 5. Enemies
+        if (Math.random() < 0.15) {
+            const x = startX + Math.random() * (endX - startX);
+            const y = GAME_HEIGHT - 180 - Math.random() * 50;
+            const type = Math.random() < 0.5 ? 'monkey' : 'toucan';
+            enemies.push(new Enemy(x, y, type));
+        }
+    }
+}
+
+// --- GAME LOGIC ---
+
+function update(dt) {
+    if (gameState !== 'PLAYING') return;
+
+    // 1. World Scrolling
+    // Scroll speed increases over distance
+    scrollSpeed = SCROLL_SPEED_BASE + distance * SCROLL_SPEED_INCREMENT;
+    
+    // Update all objects based on scroll speed
+    const scrollOffset = scrollSpeed * dt;
+
+    // Move elements left (simulating world moving right)
+    platforms.forEach(p => p.x -= scrollOffset);
+    vines.forEach(v => v.x -= scrollOffset);
+    collectibles.forEach(c => c.x -= scrollOffset);
+    hazards.forEach(h => h.x -= scrollOffset);
+    enemies.forEach(e => e.x -= scrollOffset);
+
+    // 2. Player Update
+    player.update(dt);
+
+    // 3. Collision Detection
+    
+    // A. Platform/Ground Collision
+    if (!player.isSwinging && !player.onGround) {
+        player.onGround = false;
+        platforms.forEach(p => {
+            if (checkAABB(player, p)) {
+                // Simple collision response: snap to top of platform
+                player.y = p.y - player.height;
+                player.vy = 0;
+                player.onGround = true;
+            }
+        });
+    }
+
+    // B. Vine Interaction
+    vines.forEach(vine => {
+        // Check if player is near the vine anchor point and airborne
+        if (!player.isSwinging && !player.onGround) {
+            player.grabVine(vine);
+        }
+    });
+
+    // C. Collectibles
+    collectibles = collectibles.filter(c => {
+        if (checkAABB(player, c)) {
+            score += c.type === 'gold' ? 10 : (c.type === 'red' ? 50 : 25);
+            if (c.type === 'fruit') {
+                hp = Math.min(3, hp + 1);
+                playSound('fruit');
+            }
+            multiplier = Math.min(5, multiplier + 0.1); // Small combo boost
+            playSound('gem');
+            return false; // Remove collectible
+        }
+        return true;
+    });
+
+    // D. Hazards & Enemies
+    
+    // Projectiles (Hazards)
+    hazards = hazards.filter(h => {
+        h.x -= scrollSpeed * dt;
+        if (checkAABB(player, h)) {
+            if (h.type === 'snake' || h.type === 'rock' || h.type === 'coconut') {
+                player.die();
+                playSound('thud');
+                return false; // Remove projectile
+            }
+        }
+        return h.x > -50; // Keep projectiles on screen
+    });
+
+    // Enemies
+    enemies.forEach(e => {
+        e.update();
+        if (checkAABB(player, e)) {
+            player.die();
+            playSound('thud');
+        }
+    });
+
+    // 4. Cleanup and Scoring
+    
+    // Remove off-screen elements (optimization)
+    platforms = platforms.filter(p => p.x + p.width > -100);
+    vines = vines.filter(v => v.x + 100 > -100);
+    collectibles = collectibles.filter(c => c.x + 100 > -100);
+    hazards = hazards.filter(h => h.x + 100 > -100);
+    enemies = enemies.filter(e => e.x + 100 > -100);
+
+    // Update distance and score
+    distance += scrollSpeed * dt;
+    score += Math.floor(scrollSpeed * 0.1); // Passive score
+
+    // 5. Shake Timer
+    if (shakeIntensity > 0) {
+        shakeIntensity -= 0.1;
+    }
+}
+
+function draw() {
+    // Clear canvas
+    ctx.clearRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+    // Apply screen shake offset
+    const offsetX = (Math.random() * 2 - 1) * shakeIntensity * 5;
+    const offsetY = (Math.random() * 2 - 1) * shakeIntensity * 5;
+    
+    ctx.save();
+    ctx.translate(offsetX, offsetY);
+
+    // --- Background and Environment ---
+    
+    // 1. Parallax Layers (Simulated)
+    // Far Canopy/Hills (Slowest)
+    ctx.fillStyle = '#1a4a1a';
+    ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+    // Sun Rays (Static)
+    ctx.fillStyle = 'rgba(255, 255, 200, 0.2)';
+    for (let i = 0; i < 5; i++) {
+        ctx.beginPath();
+        ctx.moveTo(GAME_WIDTH / 2 + (i * 50) - 100, 0);
+        ctx.lineTo(GAME_WIDTH / 2 + (i * 50) - 100 + 100, GAME_HEIGHT * 0.3);
+        ctx.lineTo(GAME_WIDTH / 2 + (i * 50) - 100 + 200, GAME_HEIGHT * 0.3);
+        ctx.fill();
+    }
+
+    // 2. Ground/River (Bottom layer)
+    ctx.fillStyle = '#0055AA'; // River blue
+    ctx.fillRect(0, GAME_HEIGHT - 50, GAME_WIDTH, 50);
+
+    // 3. Draw World Elements (Order matters for layering)
+    
+    // Platforms
+    platforms.forEach(p => p.draw(ctx));
+    
+    // Vines
+    vines.forEach(v => v.draw(ctx));
+
+    // Collectibles
+    collectibles.forEach(c => c.draw(ctx));
+
+    // Hazards
+    hazards.forEach(h => h.draw(ctx));
+
+    // Enemies
+    enemies.forEach(e => e.draw(ctx));
+
+    // Player
+    player.draw(ctx);
+
+    ctx.restore();
+
+    // --- UI Overlay ---
+    drawUI();
+}
+
+function drawUI() {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.7)';
+    ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = '16px "Courier New"';
+    ctx.textAlign = 'left';
+    
+    // Score and Multiplier
+    ctx.fillText(`SCORE: ${score}`, 10, 30);
+    ctx.fillText(`x${multiplier.toFixed(1)}`, 10, 55);
+
+    // HP and Lives
+    ctx.textAlign = 'right';
+    let hpText = 'HP: ';
+    for (let i = 0; i < hp; i++) {
+        hpText += '♥ ';
+    }
+    ctx.fillText(hpText, GAME_WIDTH - 10, 30);
+
+    // Lives
+    let livesText = 'LIVES: ';
+    for (let i = 0; i < lives; i++) {
+        livesText += '♥ ';
+    }
+    ctx.fillText(livesText, GAME_WIDTH - 10, 55);
+
+    // Distance
+    ctx.textAlign = 'center';
+    ctx.fillText(`DISTANCE: ${Math.floor(distance)}m`, GAME_WIDTH / 2, GAME_HEIGHT - 10);
+}
+
+function drawTitleScreen() {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.8)';
+    ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+    ctx.fillStyle = '#00FF00';
+    ctx.font = 'bold 48px "Courier New"';
+    ctx.textAlign = 'center';
+    ctx.fillText("JUNGLE SWING", GAME_WIDTH / 2, 120);
+
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = '20px "Courier New"';
+    ctx.fillText("JANE'S ADVENTURE", GAME_WIDTH / 2, 160);
+
+    ctx.fillStyle = '#FFD700';
+    ctx.font = '18px "Courier New"';
+    ctx.fillText("PRESS SPACE TO START", GAME_WIDTH / 2, 250);
+
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = '14px "Courier New"';
+    ctx.fillText(`HIGH SCORE: ${localStorage.getItem('jungleHighscore') || 0}`, GAME_WIDTH / 2, 300);
+}
+
+function drawGameOver() {
+    ctx.fillStyle = 'rgba(0, 0, 0, 0.9)';
+    ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+    ctx.fillStyle = '#FF0000';
+    ctx.font = 'bold 60px "Courier New"';
+    ctx.textAlign = 'center';
+    ctx.fillText("JANE FELL!", GAME_WIDTH / 2, 150);
+
+    ctx.fillStyle = '#FFFFFF';
+    ctx.font = '30px "Courier New"';
+    ctx.fillText(`FINAL SCORE: ${score}`, GAME_WIDTH / 2, 220);
+
+    ctx.fillStyle = '#00FF00';
+    ctx.font = '20px "Courier New"';
+    ctx.fillText("PRESS SPACE TO RETRY", GAME_WIDTH / 2, 300);
+}
+
+// --- INPUT HANDLERS ---
+
+function handleKeyDown(e) {
+    keys[e.key.toLowerCase()] = true;
+    
+    if (e.key === ' ' && gameState !== 'TITLE') {
+        if (gameState === 'PLAYING') {
+            player.releaseSwing();
+        } else if (gameState === 'GAMEOVER') {
+            resetGame();
+        }
+    }
+
+    if (e.key.toLowerCase() === 'p') {
+        gameState = (gameState === 'PLAYING' || gameState === 'PAUSED') ? (gameState === 'PLAYING' ? 'PAUSED' : 'PLAYING') : gameState;
+    }
+
+    if (e.key.toLowerCase() === 'm') {
+        isMuted = !isMuted;
+    }
+}
+
+function handleKeyUp(e) {
+    keys[e.key.toLowerCase()] = false;
+}
+
+function handleTouchStart(e) {
+    e.preventDefault();
+    const touch = e.touches[0];
+    if (touch.clientX > GAME_WIDTH / 2) {
+        touchState.right = true;
+    } else {
+        touchState.left = true;
+    }
+}
+
+function handleTouchEnd(e) {
+    e.preventDefault();
+    for (let touch of e.changedTouches) {
+        if (touch.clientX > GAME_WIDTH / 2) {
+            touchState.right = false;
+        } else {
+            touchState.left = false;
+        }
+    }
+}
+
+// --- GAME FLOW ---
+
+function resetGame() {
+    score = 0;
+    multiplier = 1;
+    distance = 0;
+    lives = 3;
+    hp = 3;
+    scrollSpeed = SCROLL_SPEED_BASE;
+    player.resetPlayerPosition();
+    
+    generateWorld();
+    gameState = 'PLAYING';
+    lastTime = performance.now();
+}
+
+function gameLoop(timestamp) {
+    const dt = (timestamp - lastTime) / 1000; // Delta time in seconds
+    lastTime = timestamp;
+
+    if (gameState === 'PLAYING') {
+        update(dt);
+        draw();
+    } else if (gameState === 'PAUSED') {
+        draw();
+        ctx.fillStyle = 'rgba(0, 0, 0, 0.5)';
+        ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+        ctx.fillStyle = '#FFFFFF';
+        ctx.font = '30px "Courier New"';
+        ctx.textAlign = 'center';
+        ctx.fillText("PAUSED", GAME_WIDTH / 2, GAME_HEIGHT / 2);
+    } else if (gameState === 'TITLE') {
+        drawTitleScreen();
+    } else if (gameState === 'GAMEOVER') {
+        drawGameOver();
+        if (score > (localStorage.getItem('jungleHighscore') || 0)) {
+            localStorage.setItem('jungleHighscore', score);
+        }
+    }
+
+    requestAnimationFrame(gameLoop);
+}
+
+// --- UTILITIES ---
+
+function checkAABB(rect1, rect2) {
+    // rect1: {x, y, width, height}
+    // rect2: {x, y, width, height}
+    return rect1.x < rect2.x + rect2.width &&
+           rect1.x + rect1.width > rect2.x &&
+           rect1.y < rect2.y + rect2.height &&
+           rect1.y + rect1.height > rect2.y;
+}
+
+// --- INITIALIZATION ---
+
+function init() {
+    initAudio();
+    player = new Player();
+    generateWorld();
+
+    // Event Listeners
+    window.addEventListener('keydown', handleKeyDown);
+    window.addEventListener('keyup', handleKeyUp);
+    
+    canvas.addEventListener('touchstart', handleTouchStart);
+    canvas.addEventListener('touchend', handleTouchEnd);
+    canvas.addEventListener('touchcancel', handleTouchEnd);
+
+    // Start the loop
+    requestAnimationFrame(gameLoop);
+}
+
+init();
+
+</script>
+</body>
+</html>

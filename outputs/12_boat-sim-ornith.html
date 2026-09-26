@@ -1,0 +1,812 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>HARBOR CAPTAIN</title>
+    <style>
+        body {
+            margin: 0;
+            background-color: #000;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            overflow: hidden;
+            font-family: 'Courier New', Courier, monospace;
+            color: #fff;
+            user-select: none;
+        }
+        #game-container {
+            position: relative;
+            box-shadow: 0 0 30px rgba(0, 0, 0, 0.8);
+            border: 4px solid #333;
+        }
+        canvas {
+            display: block;
+            background-color: #003366; /* Deep Blue Water Base */
+        }
+        /* CRT Effects */
+        #game-container::after {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background: repeating-linear-gradient(
+                0deg,
+                rgba(0, 0, 0, 0.15),
+                rgba(0, 0, 0, 0.15) 1px,
+                transparent 1px,
+                transparent 2px
+            );
+            pointer-events: none;
+            opacity: 0.5;
+        }
+        #game-container::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            box-shadow: inset 0 0 100px rgba(0, 0, 0, 0.5);
+            pointer-events: none;
+            opacity: 0.6;
+        }
+        .overlay {
+            position: absolute;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            background: rgba(0, 0, 0, 0.8);
+            text-align: center;
+            z-index: 100;
+        }
+        .ui-text {
+            position: absolute;
+            font-size: 14px;
+            text-shadow: 2px 2px #000;
+            padding: 5px;
+            background: rgba(0, 0, 0, 0.5);
+        }
+        #hud-speed { top: 10px; left: 10px; }
+        #hud-fuel { top: 10px; right: 10px; }
+        #hud-hull { top: 35px; right: 10px; }
+        #hud-money { bottom: 10px; left: 10px; }
+        #hud-mission { bottom: 35px; left: 10px; }
+        #hud-weather { bottom: 10px; right: 10px; }
+        #mini-map { bottom: 35px; right: 10px; width: 100px; height: 100px; border: 1px solid #fff; }
+    </style>
+</head>
+<body>
+
+<div id="game-container">
+    <canvas id="gameCanvas" width="800" height="600"></canvas>
+    
+    <!-- UI Overlays -->
+    <div id="hud-speed" class="ui-text">Speed: 0 knots</div>
+    <div id="hud-fuel" class="ui-text">Fuel: 100%</div>
+    <div id="hud-hull" class="ui-text">Hull: 100%</div>
+    <div id="hud-money" class="ui-text">Money: $0</div>
+    <div id="hud-mission" class="ui-text">Mission: Idle</div>
+    <div id="hud-weather" class="ui-text">Weather: Calm</div>
+    <div id="mini-map" class="ui-text"></div>
+
+    <!-- Title/Game Over Screens -->
+    <div id="title-screen" class="overlay">
+        <div>
+            <h1>HARBOR CAPTAIN</h1>
+            <p>A 90s Top-Down Boat Sim</p>
+            <p>W/Up: Throttle | S/Down: Reverse | A/Left/D/Right: Steer | Space: Horn</p>
+            <p>Press SPACE to Sail</p>
+        </div>
+    </div>
+
+    <div id="game-over-screen" class="overlay" style="display: none;">
+        <div>
+            <h1 id="game-over-title">SUNK!</h1>
+            <p>Final Score: $<span id="final-score">0</span></p>
+            <p>Press SPACE to Retry</p>
+        </div>
+    </div>
+
+</div>
+
+<script>
+/**
+ * HARBOR CAPTAIN - Expert HTML5 Game Developer Implementation
+ * Single file, Vanilla JS, Canvas API, Web Audio API.
+ */
+
+const canvas = document.getElementById('gameCanvas');
+const ctx = canvas.getContext('2d');
+const GAME_WIDTH = canvas.width;
+const GAME_HEIGHT = canvas.height;
+
+// --- CONFIGURATION ---
+const CONFIG = {
+    MAX_SPEED: 6.0, // Knots
+    ACCELERATION: 0.05,
+    DRAG: 0.98,
+    TURN_RATE_BASE: 0.04,
+    SHALLOW_SPEED_MULTIPLIER: 0.3,
+    FUEL_CONSUMPTION_RATE: 0.005,
+    MAX_FUEL: 100,
+    MAX_HULL: 100,
+    MISSION_REWARD_BASE: 200,
+    WEATHER_CYCLE_TIME: 60, // seconds
+    DAY_NIGHT_CYCLE_TIME: 180, // seconds
+    TICK_RATE: 1000 / 60,
+};
+
+// --- GAME STATE ---
+let gameState = {
+    running: false,
+    paused: false,
+    money: 0,
+    highScore: 0,
+    lastTime: 0,
+    time: 0, // seconds since start
+    weatherState: 'CALM', // CALM, WINDY, STORMY
+    dayCycle: 0.0, // 0 (Night) to 1 (Day)
+    mission: null,
+    isDocking: false,
+    isSinking: false,
+};
+
+// --- AUDIO SETUP ---
+const audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+let engineOscillator = null;
+let engineGain = null;
+
+function playSound(type, duration = 0.1) {
+    const oscillator = audioCtx.createOscillator();
+    const gainNode = audioCtx.createGain();
+
+    oscillator.connect(gainNode);
+    gainNode.connect(audioCtx.destination);
+
+    if (type === 'horn') {
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(440, audioCtx.currentTime);
+        gainNode.gain.setValueAtTime(0.5, audioCtx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+        oscillator.start(audioCtx.currentTime);
+        oscillator.stop(audioCtx.currentTime + duration);
+    } else if (type === 'collision') {
+        oscillator.type = 'sawtooth';
+        oscillator.frequency.setValueAtTime(100 + Math.random() * 200, audioCtx.currentTime);
+        gainNode.gain.setValueAtTime(0.8, audioCtx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+        oscillator.start(audioCtx.currentTime);
+        oscillator.stop(audioCtx.currentTime + duration);
+    } else if (type === 'pickup') {
+        oscillator.type = 'sine';
+        oscillator.frequency.setValueAtTime(880, audioCtx.currentTime);
+        gainNode.gain.setValueAtTime(0.4, audioCtx.currentTime);
+        gainNode.gain.exponentialRampToValueAtTime(0.001, audioCtx.currentTime + duration);
+        oscillator.start(audioCtx.currentTime);
+        oscillator.stop(audioCtx.currentTime + duration);
+    }
+}
+
+// --- OBJECT CLASSES ---
+
+class Boat {
+    constructor() {
+        this.x = GAME_WIDTH / 2;
+        this.y = GAME_HEIGHT / 2;
+        this.width = 30;
+        this.height = 15;
+        this.angle = 0; // Radians
+        this.vx = 0;
+        this.vy = 0;
+        this.speed = 0; // Knots
+        this.hullIntegrity = CONFIG.MAX_HULL;
+        this.fuel = CONFIG.MAX_FUEL;
+        this.cargo = null; // {type: 'crate', destination: 'D'}
+    }
+
+    update(dt) {
+        // 1. Physics
+        let throttle = 0;
+        let turnInput = 0;
+
+        if (keys.w || keys.ArrowUp) {
+            throttle = 1;
+        } else if (keys.s || keys.ArrowDown) {
+            throttle = -1;
+        }
+
+        // Acceleration
+        let acceleration = throttle * CONFIG.ACCELERATION;
+        this.vx += Math.cos(this.angle) * acceleration;
+        this.vy += Math.sin(this.angle) * acceleration;
+
+        // Turning (Proportional to speed)
+        let turnRate = CONFIG.TURN_RATE_BASE * (this.speed / CONFIG.MAX_SPEED + 0.1);
+        if (keys.a || keys.ArrowLeft) {
+            this.angle -= turnRate * dt;
+        }
+        if (keys.d || keys.ArrowRight) {
+            this.angle += turnRate * dt;
+        }
+
+        // Apply Drag/Friction
+        this.vx *= CONFIG.DRAG;
+        this.vy *= CONFIG.DRAG;
+
+        // Calculate Speed
+        this.speed = Math.sqrt(this.vx * this.vx + this.vy * this.vy);
+        
+        // Apply Weather/Environment Effects
+        let windX = 0;
+        let windY = 0;
+        if (gameState.weatherState === 'WINDY') {
+            windX = Math.cos(this.angle + Math.PI / 2) * 0.1;
+            windY = Math.sin(this.angle + Math.PI / 2) * 0.1;
+        } else if (gameState.weatherState === 'STORMY') {
+            windX = Math.cos(this.angle + Math.PI / 2) * 0.2;
+            windY = Math.sin(this.angle + Math.PI / 2) * 0.2;
+        }
+
+        this.vx += windX;
+        this.vy += windY;
+
+        // 2. Environment Interaction (Collision & Shallow Water)
+        let isShallow = checkShallowWater(this.x, this.y);
+        let effectiveDrag = isShallow ? 0.95 : CONFIG.DRAG;
+        
+        // Apply effective drag
+        this.vx *= effectiveDrag;
+        this.vy *= effectiveDrag;
+
+        // Apply movement
+        this.x += this.vx;
+        this.y += this.vy;
+
+        // 3. Fuel and Damage
+        let fuelCost = CONFIG.FUEL_CONSUMPTION_RATE * (this.speed / CONFIG.MAX_SPEED + 0.5);
+        this.fuel -= fuelCost * dt;
+
+        // Collision Detection (Simple boundary check for now)
+        if (checkCollision(this)) {
+            this.hullIntegrity -= 5;
+            playSound('collision');
+        }
+
+        // 4. Update Engine Sound (Pitch based on speed)
+        if (this.speed > 0.1) {
+            const pitch = 100 + this.speed * 50;
+            engineOscillator.frequency.setValueAtTime(pitch, audioCtx.currentTime);
+        } else {
+            // Stop engine sound when stopped
+            if (engineOscillator) {
+                engineOscillator.stop();
+                engineOscillator = null;
+            }
+        }
+    }
+
+    draw(ctx) {
+        // 1. Hull (Main Body)
+        ctx.save();
+        ctx.translate(this.x, this.y);
+        ctx.rotate(this.angle);
+
+        // Base Hull
+        ctx.fillStyle = '#A0A0A0'; // Gray hull
+        ctx.fillRect(-this.width / 2, -this.height / 2, this.width, this.height);
+
+        // Cabin
+        ctx.fillStyle = '#333';
+        ctx.fillRect(this.width / 4, -this.height / 2 - 5, this.width / 2, this.height / 3);
+
+        // Bow Spray (High Speed Effect)
+        if (this.speed > 3) {
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+            ctx.fillRect(-this.width / 2, -this.height / 2, this.width, 3);
+        }
+
+        ctx.restore();
+
+        // 2. Wake Trail (Particles)
+        drawWake(ctx, this.x, this.y, this.angle, this.speed);
+    }
+}
+
+class Particle {
+    constructor(x, y, color, vx, vy, life) {
+        this.x = x;
+        this.y = y;
+        this.color = color;
+        this.vx = vx;
+        this.vy = vy;
+        this.life = life;
+        this.initialLife = life;
+    }
+
+    update() {
+        this.x += this.vx;
+        this.y += this.vy;
+        this.life -= 1;
+        this.vx *= 0.99;
+        this.vy *= 0.99;
+    }
+
+    draw(ctx) {
+        const alpha = this.life / this.initialLife;
+        ctx.fillStyle = `rgba(255, 255, 255, ${alpha})`;
+        ctx.fillRect(this.x, this.y, 2, 2);
+    }
+}
+
+// --- WORLD ELEMENTS ---
+
+const DOCKS = {
+    A: { x: 50, y: 50, name: 'Dock A' },
+    B: { x: 750, y: 50, name: 'Dock B' },
+    C: { x: 50, y: 550, name: 'Dock C' },
+    D: { x: 750, y: 550, name: 'Dock D' },
+    E: { x: 400, y: 100, name: 'Dock E' }
+};
+
+const OBSTACLES = [
+    // Rocks (simple circles)
+    { x: 150, y: 200, r: 15, type: 'rock' },
+    { x: 650, y: 400, r: 10, type: 'rock' },
+    // Buoys
+    { x: 300, y: 300, r: 5, type: 'buoy' }
+];
+
+let particles = [];
+
+function checkCollision(boat) {
+    // Check against obstacles
+    for (const obs of OBSTACLES) {
+        const dx = boat.x - obs.x;
+        const dy = boat.y - obs.y;
+        const distance = Math.sqrt(dx * dx + dy * dy);
+        if (distance < obs.r + boat.width / 2) {
+            return true;
+        }
+    }
+    // Check against shore (simplified)
+    if (boat.x < 0 || boat.x > GAME_WIDTH || boat.y < 0 || boat.y > GAME_HEIGHT) {
+        return true;
+    }
+    return false;
+}
+
+function checkShallowWater(x, y) {
+    // Shallow zone near edges
+    return x < 100 || x > 700 || y < 100 || y > 500;
+}
+
+function getDock(x, y) {
+    for (const key in DOCKS) {
+        const dock = DOCKS[key];
+        if (Math.abs(dock.x - x) < 50 && Math.abs(dock.y - y) < 50) {
+            return key;
+        }
+    }
+    return null;
+}
+
+// --- MISSION LOGIC ---
+
+const CARGO_TYPES = ['crate', 'fuel', 'pass'];
+
+function startNewMission(boat) {
+    const availableDocks = Object.keys(DOCKS).filter(k => k !== 'A');
+    const startDockKey = 'A';
+    const destinationKey = availableDocks[Math.floor(Math.random() * availableDocks.length)];
+    const cargoType = CARGO_TYPES[Math.floor(Math.random() * CARGO_TYPES.length)];
+
+    boat.cargo = {
+        type: cargoType,
+        destination: destinationKey,
+        pickupDock: startDockKey,
+        status: 'PICKUP'
+    };
+    gameState.mission = {
+        startDock: startDockKey,
+        endDock: destinationKey,
+        cargoType: cargoType,
+        reward: CONFIG.MISSION_REWARD_BASE + Math.floor(Math.random() * 300)
+    };
+    console.log(`Mission started: Pick up ${cargoType} at ${startDockKey}, deliver to ${destinationKey}`);
+}
+
+function handleDocking(boat, dockKey) {
+    if (boat.speed < 3) {
+        if (gameState.mission && gameState.mission.startDock === dockKey && boat.cargo === null) {
+            // Pickup
+            boat.cargo = {
+                type: gameState.mission.cargoType,
+                destination: gameState.mission.endDock,
+                pickupDock: dockKey,
+                status: 'TRAVEL'
+            };
+            playSound('pickup');
+            gameState.mission.status = 'IN_TRANSIT';
+            return true;
+        } 
+        else if (gameState.mission && gameState.mission.endDock === dockKey && boat.cargo) {
+            // Delivery
+            const deliveryTime = gameState.time - gameState.mission.startTime;
+            let bonus = Math.max(0, 1000 - deliveryTime * 5); // Faster = more bonus
+            let finalReward = gameState.mission.reward + bonus;
+            
+            gameState.money += finalReward;
+            playSound('pickup'); // Reusing chime for delivery success
+            
+            // Reset mission
+            gameState.mission = null;
+            boat.cargo = null;
+            return true;
+        }
+    }
+    return false;
+}
+
+// --- GAME LOGIC FUNCTIONS ---
+
+function updateGame(dt) {
+    if (!gameState.running || gameState.paused) return;
+
+    gameState.time += dt;
+    
+    // 1. Update Boat
+    boat.update(dt);
+
+    // 2. Update Environment
+    updateWeather(dt);
+    updateDayNight(dt);
+
+    // 3. Update Particles
+    for (let i = particles.length - 1; i >= 0; i--) {
+        particles[i].update();
+        if (particles[i].life <= 0) {
+            particles.splice(i, 1);
+        }
+    }
+
+    // 4. Mission/Dock Logic
+    const currentDockKey = getDock(boat.x, boat.y);
+    
+    if (currentDockKey) {
+        if (boat.speed < 3) {
+            if (handleDocking(boat, currentDockKey)) {
+                if (boat.cargo && boat.cargo.status === 'TRAVEL') {
+                    gameState.mission.startTime = gameState.time; // Start timing delivery
+                }
+            }
+        }
+    }
+
+    // 5. Game Over Conditions
+    if (boat.hullIntegrity <= 0) {
+        gameState.isSinking = true;
+        gameOver('SUNK!');
+    }
+    if (boat.fuel <= 0 && boat.speed > 0.1) {
+        // Run out of fuel - drift
+        boat.vx *= 0.95;
+        boat.vy *= 0.95;
+        if (boat.speed > 0.1) {
+             gameState.money -= 50; // Tow fee
+             console.log("Ran out of fuel, towed for $50.");
+        }
+    }
+
+    // 6. UI Update
+    updateUI(boat);
+}
+
+function updateWeather(dt) {
+    const cycleTime = CONFIG.WEATHER_CYCLE_TIME;
+    const cycleProgress = (gameState.time % cycleTime) / cycleTime;
+
+    if (cycleProgress < 0.2) {
+        gameState.weatherState = 'CALM';
+    } else if (cycleProgress < 0.5) {
+        gameState.weatherState = 'WINDY';
+    } else if (cycleProgress < 0.8) {
+        gameState.weatherState = 'STORMY';
+    } else {
+        gameState.weatherState = 'CALM';
+    }
+}
+
+function updateDayNight(dt) {
+    const cycleTime = CONFIG.DAY_NIGHT_CYCLE_TIME;
+    const cycleProgress = (gameState.time % cycleTime) / cycleTime;
+
+    // 0.0 to 0.25: Night -> Dawn
+    // 0.25 to 0.5: Dawn -> Day
+    // 0.5 to 0.75: Day -> Dusk
+    // 0.75 to 1.0: Dusk -> Night
+    
+    if (cycleProgress < 0.25) {
+        gameState.dayCycle = (cycleProgress / 0.25) * 0.5; // 0.5 to 0
+    } else if (cycleProgress < 0.5) {
+        gameState.dayCycle = (cycleProgress - 0.25) / 0.25; // 0 to 0.5
+    } else if (cycleProgress < 0.75) {
+        gameState.dayCycle = 1 - ((cycleProgress - 0.5) / 0.25); // 0.5 to 0
+    } else {
+        gameState.dayCycle = 0 - ((cycleProgress - 0.75) / 0.25); // 0 to -0.5 (handled by modulo)
+    }
+    gameState.dayCycle = Math.max(0, Math.min(1, gameState.dayCycle));
+}
+
+// --- DRAW FUNCTIONS ---
+
+function drawWater(ctx, dt) {
+    ctx.fillStyle = '#003366'; // Base water color
+
+    // Water Shimmer (Sine Wave)
+    const waveAmplitude = 5 + (gameState.weatherState === 'STORMY' ? 15 : 0);
+    const waveSpeed = 0.01 * dt;
+
+    ctx.beginPath();
+    for (let x = 0; x < GAME_WIDTH; x += 5) {
+        const yOffset = Math.sin((x * 0.02) + (gameState.time * waveSpeed)) * waveAmplitude;
+        ctx.lineTo(x, GAME_HEIGHT / 2 + yOffset);
+    }
+    ctx.lineTo(GAME_WIDTH, GAME_HEIGHT);
+    ctx.lineTo(0, GAME_HEIGHT);
+    ctx.closePath();
+    ctx.fill();
+
+    // Add subtle highlights based on day cycle
+    const lightIntensity = gameState.dayCycle * 0.3 + 0.1;
+    ctx.fillStyle = `rgba(255, 255, 255, ${lightIntensity})`;
+    ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+}
+
+function drawWake(ctx, x, y, angle, speed) {
+    const numParticles = Math.floor(speed * 2);
+    for (let i = 0; i < numParticles; i++) {
+        const angleOffset = (i / numParticles) * Math.PI * 2;
+        const px = x - Math.cos(angle) * 10 - Math.sin(angle) * 5;
+        const py = y - Math.sin(angle) * 10 + Math.cos(angle) * 5;
+
+        // Create a particle trail
+        const p = new Particle(px, py, 'white', 
+            (Math.random() - 0.5) * 0.5, (Math.random() - 0.5) * 0.5, 60);
+        particles.push(p);
+    }
+}
+
+function drawObstacles(ctx) {
+    // Rocks
+    ctx.fillStyle = '#666';
+    for (const obs of OBSTACLES) {
+        if (obs.type === 'rock') {
+            ctx.beginPath();
+            ctx.arc(obs.x, obs.y, obs.r, 0, Math.PI * 2);
+            ctx.fill();
+        }
+        // Buoys
+        if (obs.type === 'buoy') {
+            ctx.fillStyle = 'red';
+            ctx.beginPath();
+            ctx.arc(obs.x, obs.y, obs.r, 0, Math.PI * 2);
+            ctx.fill();
+        }
+    }
+}
+
+function drawDocks(ctx) {
+    ctx.fillStyle = '#888'; // Dock color
+    for (const key in DOCKS) {
+        const dock = DOCKS[key];
+        ctx.fillRect(dock.x - 20, dock.y - 10, 40, 20);
+        
+        // Label
+        ctx.fillStyle = '#fff';
+        ctx.font = '10px Courier New';
+        ctx.fillText(key, dock.x - 5, dock.y + 5);
+    }
+}
+
+function drawMiniMap(ctx, boat) {
+    const mapSize = 100;
+    const mapX = GAME_WIDTH - mapSize - 20;
+    const mapY = GAME_HEIGHT - mapSize - 20;
+    
+    ctx.fillStyle = '#111';
+    ctx.fillRect(mapX, mapY, mapSize, mapSize);
+    ctx.strokeStyle = '#fff';
+    ctx.strokeRect(mapX, mapY, mapSize, mapSize);
+
+    // Draw Docks on map
+    ctx.fillStyle = 'yellow';
+    for (const key in DOCKS) {
+        const dock = DOCKS[key];
+        const mapX_norm = (dock.x / GAME_WIDTH) * mapSize;
+        const mapY_norm = (dock.y / GAME_HEIGHT) * mapSize;
+        ctx.fillRect(mapX + mapX_norm, mapY + mapY_norm, 5, 5);
+    }
+
+    // Draw Boat on map
+    const mapBoatX = (boat.x / GAME_WIDTH) * mapSize;
+    const mapBoatY = (boat.y / GAME_HEIGHT) * mapSize;
+    ctx.fillStyle = 'cyan';
+    ctx.beginPath();
+    ctx.arc(mapX + mapBoatX, mapY + mapBoatY, 3, 0, Math.PI * 2);
+    ctx.fill();
+}
+
+function drawHUD(boat) {
+    // Speed
+    document.getElementById('hud-speed').textContent = `Speed: ${Math.round(boat.speed * 2)} knots`;
+
+    // Fuel
+    const fuelPercent = Math.max(0, boat.fuel / CONFIG.MAX_FUEL * 100);
+    document.getElementById('hud-fuel').innerHTML = `Fuel: ${Math.round(fuelPercent)}% <div style="width: 100px; height: 4px; background: #555; border: 1px solid #fff;"><div style="width: ${fuelPercent}%; height: 100%; background: green;"></div></div>`;
+
+    // Hull
+    const hullPercent = Math.max(0, boat.hullIntegrity / CONFIG.MAX_HULL * 100);
+    let hullColor = hullPercent > 50 ? 'green' : hullPercent > 20 ? 'orange' : 'red';
+    document.getElementById('hud-hull').innerHTML = `Hull: ${Math.round(hullPercent)}% <div style="width: 100px; height: 4px; background: #555; border: 1px solid #fff;"><div style="width: ${hullPercent}%; height: 100%; background: ${hullColor};"></div></div>`;
+
+    // Money
+    document.getElementById('hud-money').textContent = `Money: $${gameState.money}`;
+
+    // Mission
+    let missionText = 'Idle';
+    if (gameState.mission) {
+        missionText = `Mission: ${gameState.mission.cargoType.toUpperCase()} to ${gameState.mission.endDock}`;
+    } else if (boat.cargo) {
+        missionText = `Cargo: ${boat.cargo.type} (${boat.cargo.status})`;
+    }
+    document.getElementById('hud-mission').textContent = missionText;
+
+    // Weather
+    document.getElementById('hud-weather').textContent = `Weather: ${gameState.weatherState}`;
+}
+
+function drawGame() {
+    // Clear canvas
+    ctx.clearRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+    // Apply Day/Night Tint
+    let tintColor = `rgba(0, 0, 0, ${1 - gameState.dayCycle * 0.5})`; // Darker at night
+    ctx.fillStyle = tintColor;
+    ctx.fillRect(0, 0, GAME_WIDTH, GAME_HEIGHT);
+
+    // Draw Water (Shimmer)
+    drawWater(ctx, gameState.time);
+
+    // Draw World
+    drawDocks(ctx);
+    drawObstacles(ctx);
+
+    // Draw Boat
+    boat.draw(ctx);
+
+    // Draw Particles (Wake/Rain)
+    for (const p of particles) {
+        p.draw(ctx);
+    }
+
+    // Draw UI
+    drawHUD(boat);
+    drawMiniMap(ctx, boat);
+}
+
+// --- GAME LOOP & INITIALIZATION ---
+
+let boat;
+let lastTime = 0;
+let keys = {};
+
+function gameLoop(timestamp) {
+    const dt = timestamp - lastTime;
+    lastTime = timestamp;
+
+    if (gameState.running && !gameState.paused) {
+        updateGame(dt);
+    }
+    
+    drawGame();
+    requestAnimationFrame(gameLoop);
+}
+
+function initializeGame() {
+    boat = new Boat();
+    gameState.money = 0;
+    gameState.time = 0;
+    gameState.running = true;
+    gameState.isSinking = false;
+    gameState.paused = false;
+    
+    // Start engine audio context
+    if (audioCtx.state === 'suspended') {
+        audioCtx.resume();
+    }
+
+    // Setup Engine Oscillator
+    engineOscillator = audioCtx.createOscillator();
+    engineOscillator.connect(audioCtx.destination);
+    engineGain = audioCtx.createGain();
+    engineOscillator.connect(engineGain);
+    engineGain.connect(audioCtx.destination);
+    engineOscillator.start();
+    engineGain.gain.setValueAtTime(0.0, audioCtx.currentTime); // Start silent
+
+    // Start the loop
+    lastTime = performance.now();
+    requestAnimationFrame(gameLoop);
+}
+
+function gameOver(title) {
+    gameState.running = false;
+    document.getElementById('game-over-title').textContent = title;
+    document.getElementById('final-score').textContent = gameState.money;
+    document.getElementById('game-over-screen').style.display = 'flex';
+}
+
+function setupListeners() {
+    window.addEventListener('keydown', (e) => {
+        keys[e.key] = true;
+        if (e.key === ' ' && gameState.running && !gameState.paused) {
+            playSound('horn');
+        }
+        if (e.key === 'p') {
+            gameState.paused = !gameState.paused;
+        }
+        if (e.key === ' ' && !gameState.running) {
+            initializeGame();
+        }
+        if (e.key === 'r' && gameState.isSinking) {
+            initializeGame();
+        }
+    });
+
+    window.addEventListener('keyup', (e) => {
+        keys[e.key] = false;
+    });
+
+    // Touch controls (Simplified)
+    canvas.addEventListener('touchstart', (e) => {
+        e.preventDefault();
+        const touch = e.touches[0];
+        const rect = canvas.getBoundingClientRect();
+        const touchX = touch.clientX - rect.left;
+        const touchY = touch.clientY - rect.top;
+
+        // Simple directional mapping based on screen quadrants
+        if (touchX < GAME_WIDTH / 2 && touchY < GAME_HEIGHT / 2) {
+            keys['ArrowUp'] = true; // Forward
+        } else if (touchX > GAME_WIDTH / 2 && touchY < GAME_HEIGHT / 2) {
+            keys['ArrowDown'] = true; // Reverse
+        } else if (touchX < GAME_WIDTH / 2) {
+            keys['ArrowLeft'] = true; // Left
+        } else {
+            keys['ArrowRight'] = true; // Right
+        }
+    });
+
+    canvas.addEventListener('touchend', (e) => {
+        e.preventDefault();
+        // Clear all directional keys on touch end
+        keys['ArrowUp'] = keys['ArrowDown'] = keys['ArrowLeft'] = keys['ArrowRight'] = false;
+    });
+}
+
+setupListeners();
+// Initial draw to show title screen
+drawGame(); 
+
+</script>
+</body>
+</html>
